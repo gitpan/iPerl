@@ -29,7 +29,50 @@ This is the engine of an inverse Perl interpreter, which controls normal text
 with macro invocations and specially marked bits of Perl.  This setup of the
 document is always the same, though details may vary according to the style in
 effect.  (See C<set_style>.)  The engine is invoked with C<include>, or its
-variants C<include_filehandle> and C<include_string>.
+variants C<include_filehandle> and C<include_string>.  It treats a given
+document in two phases, with two or three aspects:
+
+=head2 Markup style
+
+Bits of Perl to be evaluated have to be specially marked up as such.  How this
+is done differs greatly depending on the style in effect.  But apart from
+different syntaxes there are only two fundamental ways in which Perl can be
+embedded: non-printing and printing.  Not all styles provide both ways.  The
+difference between these two ways is to be seen as default-functionality and
+is not restrictive.  Non-printing Perl may very well use the print statement,
+or system-commands to output something via C<STDOUT> into the output stream.
+If system-commands are used you should first turn on autoflushing (C<$| = 1>)
+to ensure that output order is preserved.
+
+=head2 Perl
+
+The whole document is actually reinverted or transformed into a
+Perl-programme, where each bit of normal text gets transformed into a
+semicolon-terminated Perl-statement.  The markup around bits of non-printing
+Perl simply gets removed and a terminating semicolon added, which almost never
+hurts.  If you want a bit of non-printing Perl to control the preceding or
+following bit of normal text, you can prevent the semicolon by starting or
+ending the Perl code with C<\;>.  You can delimit the bit of normal text with
+a bit of non-printing Perl containing only a semicolon.
+
+Printing bits of Perl, on the other hand, get passed as an argument list to a
+print statement, or to printf, if it starts with C<%>.  If a printing bit of
+Perl is empty, C<$_> is printed.  If it is a literal integer, C<$_[I<n>]> is
+printed.
+
+There are several interesting things you can do with syntactically incomplete
+bits of Perl.  You can seal the fate of the following bit of plain text by
+preceding it with an expression followed by C<and> or C<or> and terminated
+with C<\;>.  Or you can have dangling curly braces of an
+C<if-elsif-else>-statement.  They might also be of a loop, which will likely
+contain one or more printing bits of Perl.
+
+Dangling curly braces may even be of a sub, which will then print the
+contained plain text when called.  Likewise they may be of an anonymous sub
+which could be the second argument to C<define>.
+
+There are no syntactic extensions to Perl, just a couple of variables and
+functions like C<include> or C<define>.
 
 =head2 Macros
 
@@ -48,41 +91,6 @@ underscores, optionally immediately followed by a parenthesized Perl parameter
 list.  Depending on the style, macro invocations may be surrounded by
 additional syntactic sugar.
 
-=head2 Empedded Perl
-
-Bits of Perl to be evaluated have to be specially marked up as such.  How this
-is done differs greatly depending on the style in effect.  But apart from
-different syntaxes there are only two fundamental ways in which Perl can be
-embedded: non-printing and printing.  Not all styles provide both ways.  The
-difference between these two ways is to be seen as default-functionality and
-is not restrictive.  Non-printing Perl may very well use the print statement,
-or system-commands to output something via C<STDOUT> into the output stream.
-If system-commands are used you should first turn on autoflushing (C<$| = 1>)
-to ensure that output order is preserved.
-
-The whole document is actually transformed into a Perl-programme, where each
-bit of normal text gets transformed into a semicolon-terminated
-Perl-statement.  The markup around bits of non-printing Perl simply gets
-removed and a terminating semicolon added, which almost never hurts.  If you
-want a bit of non-printing Perl to control the preceding or following bit of
-normal text, you can prevent the semicolon by starting or ending the Perl code
-with C<\;>.  You can delimit the bit of normal text with a bit of non-printing
-Perl containing only a semicolon.  Printing bits of Perl, on the other hand,
-get passed as an argument list to a print statement.  If a printing bit of
-Perl is empty, C<$_> is printed.  If it is a literal integer, C<$_[I<n>]> is
-printed.
-
-There are several interesting things you can do with syntactically incomplete
-bits of Perl.  You can seal the fate of the following bit of plain text by
-preceding it with an expression followed by C<and> or C<or> and terminated
-with C<\;>.  Or you can have dangling curly braces of an
-C<if-elsif-else>-statement.  They might also be of a loop, which will likely
-contain one or more printing bits of Perl.
-
-Dangling curly braces may even be of a sub, which will then print the
-contained plain text when called.  Likewise they may be of an anonymous sub
-which could be the second argument to C<define>.
-
 =head1 @EXPORT
 
 Text::iPerl exports the following functions by default:
@@ -99,6 +107,8 @@ C<$max_macro_growth>, C<$max_macro_expansions>
 
 =cut
 
+
+
 package Text::iPerl;
 
 use 5.004;
@@ -108,8 +118,9 @@ use Exporter;
 @EXPORT = qw(include include_string define undefine macro);
 @EXPORT_OK = qw(set_style $style @autostyle_by_name @autostyle_by_contents
 		$cache $debug $documents @documents $header $max_macro_growth
-		$max_macro_expansions);
-$VERSION = 0.52;
+		$max_macro_expansions $macro_start_dollar1 $macro_start
+		$macro_end $comment_level $joiner $printfer);
+$VERSION = 0.53;
 
 
 @include = ('/usr/include', @INC);
@@ -129,7 +140,12 @@ $style = 'auto';
      '!\{[\s\S]*?\}!|!<[\s\S]*?>!|^!' => bang,
      '^#' => cpp);
 
+$comment_level = 1;
+
 $max_macro_expansions = $max_macro_growth = 1000;
+
+$joiner = '\\\\;';
+$printfer = '%';
 
 $package = '';
 
@@ -455,13 +471,14 @@ sub output($) {
 }
 
 
+
 sub compile(;$$$) {
-    local $prog = '';
+    local $prog = '@_=();';
     my @_Text_iPerl;
-    local( $macro_start, $macro_end, $macro_start_dollar1,
-	   $joiner, $splitter, $style, @documents ) =
-	( $macro_start, $macro_end, $macro_start_dollar1,
-	  $joiner, $splitter, $style, @documents );
+    local( $style, $macro_start, $macro_end, $macro_start_dollar1,
+	   $joiner, $splitter, $printfer, $comment_level, @documents ) =
+	( $style, $macro_start, $macro_end, $macro_start_dollar1,
+	  $joiner, $splitter, $printfer, $comment_level, @documents );
     $documents++;
     push @documents, $_[2] || '<STRING>';
     {
@@ -488,9 +505,18 @@ sub compile(;$$$) {
 		die "No style determined for $documents[-1]";
 	    }
 	}
-	my $length;
-	while( $string ) {
-	    @res = &$splitter( $string );
+	my( $bol, $length, @res ) = 1;
+	while( 1 ) {
+	    @res = &$splitter( $string,
+			       $bol ? '^' : '(?!\A)^',
+			       ${['\Z',
+				  $bol ? '^' : '(?!\A)^',
+				  $bol ? '^[^\S\n]*' : '(?!\A)^[^\S\n]*',
+				  '']}[$comment_level],
+			       ${['',
+				  '$ \n?',
+				  '[^\S\n]*$ \n?',
+				  '']}[$comment_level] );
 	    for( $res[0] ) {
 		next unless defined and $length = length;
 		$prog .= 'Text::iPerl::output ' .
@@ -501,25 +527,20 @@ sub compile(;$$$) {
 		      '];'));
 	    }
 	    for( $res[1] ) {
-		last unless defined;
-		if( /^$joiner/ ) {
-		    $_ = $';
-		    chop $prog if $prog =~ /;$/s;
-		}
-		$_ = "\$_[$_]" if $_ eq int;
-		$prog .= 'print STDOUT (' . (/$joiner$/ ?
-			(($` || '$_') . "\n)") :
-			(($_ || '$_') . "\n);"));
+		next unless defined;
+		/\A\s*($printfer\s*)?(.*?)\s*\Z/s;
+		$prog .= 'print' . ($1 ? 'f' : '') . ' STDOUT (' .
+		    ($2 eq int( $2 ) ? "\$_[$2]" : $2 || '$_') ."\n);";
 	    }
 	    for( $res[2] ) {
-		last unless defined;
-		if( /^$joiner/ ) {
-		    $_ = $';
-		    chop $prog if $prog =~ /;$/s;
-		}
-		$prog .= /$joiner$/ ? "$`\n" : "$_\n;";
+		next unless defined;
+		/\A\s*($joiner\s*)?(.*?)\s*($joiner\s*)?\Z/s;
+		chop $prog if defined $1 && ';' eq substr $prog, -1, 1;
+		$prog .= defined $3 ? " $2 " : " $2\n;";
 	    }
+	last unless defined $res[3];
 	    $string = $res[3];
+	    $bol = defined $res[4] && "\n" eq substr $res[4], -1, 1;
 	}
     }
     if( $debug ) {
@@ -531,25 +552,27 @@ sub compile(;$$$) {
 	    print "my \$_Text_iPerl[$j] = '$_';\n\n";
 	    $j++;
 	}
-	print "$prog\n";
+	print "\f\n$prog\n";
 	exit;
     }
 
-    my( $macro_start_ref, $macro_end_ref,
-	   $joiner_ref, $splitter_ref, $documents_ref ) =
-	( \$macro_start, \$macro_end,
-	  \$joiner, \$splitter, \@documents );
-    $prog = eval qq{
+    push @_Text_iPerl,
+	\( $macro_start, $macro_end,
+	   $joiner, $splitter, $printfer, @documents );
+    $prog = eval qq|
 	sub {
-	    local( \$macro_start, \$macro_end, \$macro_start_dollar1,
-		   \$joiner, \$splitter, \$style, \@documents ) =
-		( \$\$macro_start_ref, \$\$macro_end_ref, $macro_start_dollar1,
-		  \$\$joiner_ref, \$\$splitter_ref, '$style', \@\$documents_ref );
+	    local( \$style, \$comment_level,
+		   \$macro_start_dollar1, \$macro_start, \$macro_end,
+		   \$joiner, \$splitter, \$printfer, \@documents ) =
+		( '$style', $comment_level, $macro_start_dollar1, | .
+    join( ', ', map { ($_ == -1 ? '@' : '$') .
+			  "{\$_Text_iPerl[$_]}\n" } -6..-1 ) .
+	  qq| );
 	    package $_[1];
 #line 1 '$documents[-1]'
 	    $prog
 	}
-    };
+    |;
     die $@ if $@;
     $prog;
 }
@@ -563,7 +586,10 @@ pseudo-macros.  This means, that the rest of the document is not processed and
 output.
 
 
+
 =item set_style I<STRING>[, I<ARGUMENT> ...]
+
+=item set_style I<CODEREF>
 
 Set one of the following iPerl-styles.  The various styles are more or less
 adapted to various document types.  But of course any style can be used
@@ -589,20 +615,20 @@ of the following:
 
 =cut
 
+
 sub set_style($;@) {
     my $orig_style = $style;
     $style = shift;
-
     $macro_start = $macro_end = '';
     $macro_start_dollar1 = 0;
-    $joiner = '\\\\;';
 
 
 =item 'bang'
 
 =item 'unix'
 
-Lines starting with C<#> are deleted.
+Everything on the same line after C<#> is deleted depending on
+C<$comment_level>.
 
 Lines starting with a C<!> are bits of Perl.  This reminds of interactive unix
 programs which thus allow a shell escape.
@@ -616,21 +642,21 @@ Perl values to be printed to the document are enclosed in C<!E<lt>> and
 C<E<gt>!>.  This reminds of the Perl read operator, inverted here in that the
 document reads from a Perl expression.
 
-Macros may be optionally preceded by C<&>, useful to set them of from preceding
-alphanumeric characters.
+Macros may be optionally preceded by C<&>, useful to set them off from
+preceding alphanumeric characters.
 
 =cut
 
     if( $style eq 'bang' or $style eq 'unix' ) {
 	$splitter = sub {
-	    return $`,  $1,  $2 || $3 || $4,  $'
+	    return $`,  $1,  $2 || $3 || $4,  $',  $&
 		if $_[0] =~ /
-		    ^\# .* \n? |
-		    !<\s* ([\s\S]*?) \s*>! |
-		    !\{\s* ([\s\S]*?) \s*\}! | !(\})! |
-		    ^![^\S\n]* (.*) [^\S\n]*\n?
+		    $_[2]\# .* $ $_[3] |
+		    !< ([\s\S]*?) >! |
+		    !\{ ([\s\S]*?) \}! | !(\})! |
+		    $_[1]! (.*) \n?
 		/mx;
-	    @_;
+	    $_[0];
 	};
 	$macro_start = '&?';
     }
@@ -651,21 +677,21 @@ C<^E>.  This reminds of print and end.
 
     elsif( $style =~ 'control' ) {
 	$splitter = sub {
-	    return $`,  $1,  $2 || $3,  $'
+	    return $`,  $1,  $2 || $3,  $',  $&
 		if $_[0] =~ /
-		    \s* ([\s\S]*?) \s* |
-		    \s* ([\s\S]*?) \s* |
-		    ^[^\S\n]* (.*) [^\S\n]*\n?
+		     ([\s\S]*?)  |
+		     ([\s\S]*?)  |
+		    $_[1] (.*) \n?
 		/mx;
-	    @_;
+	    $_[0];
 	};
     }
 
 
 =item 'cpp'
 
-Lines starting with C<//> are deleted.  Lines starting with C</*> are deleted
-upto next C<*/> if it is at end of line.
+Everything on the same line after C<//> or from C</*> upto next C<*/> is
+deleted depending on C<$comment_level>.
 
 Lines starting with a C<#> are bits of Perl.  They may be continued over
 several lines, as long as each line ends with a C<\>.
@@ -675,20 +701,15 @@ several lines, as long as each line ends with a C<\>.
     elsif( $style eq 'cpp' ) {
 	$splitter = sub {
 	    if( $_[0] =~ /
-		    ^\/(?:\/.*|\*(?:(?!\*\/)[\s\S])*?\*\/$) \n? |
-		    ^\#[^\S\n]* (.*) \n?
+		    $_[2]\/(?:\/.*$ \n? | \*(?:(?!\*\/)[\s\S])*?\*\/$_[3]) |
+		    $_[1]^\# ( (?:.*\\\n)* .*) \n?
 		/mx )
 	    {
-		my( $pre, $match, $post, $more ) = ($`,  $1,  $');
-		while( $match =~ /\\$/ ) {
-		    chop $match;
-		    ($more, $post) = split "\n", $post, 2;
-		    $match .= "\n$more";
-		}
-		$match =~ s/\s$//; # \ must be very last, \; need not
-		return $pre,  undef,  $match,  $post;
+		my( $pre, $match, $post, $all ) = ($`,  $1,  $', $&);
+		$match =~ s/\\$//mg;
+		return $pre,  undef,  $match,  $post, $all;
 	    }
-	    @_;
+	    $_[0];
 	};
     }
 
@@ -709,11 +730,11 @@ Perl.  And I<BEFORE> and I<AFTER> markup a plain bit of Perl.
 	$splitter = sub {
 	    return $`,  $1,  $2,  $'
 		if $_[0] =~ /
-		    $style[0] |
-		    $style[1]\s* ([\s\S]*?) \s*$style[2] |
-		    $style[3]\s* ([\s\S]*?) \s*$style[4]
+		    $_[2] $style[0] $_[3] |
+		    $style[1] ([\s\S]*?) $style[2] |
+		    $style[3] ([\s\S]*?) $style[4]
 		/mx;
-	    @_;
+	    $_[0];
 	};
     }
 
@@ -757,10 +778,10 @@ unquoted string.
 		if $_[0] =~ /
 		    ^ ([^#\n]*?) \b
 			(?:dnl\b.* \n? |
-			perl\( (?: <\s*([\s\S]*?)\s*> |
-				\{\s*([\s\S]*?)\s*\} | (\}) ) \))
+			perl\( (?: < ([\s\S]*?) > |
+				\{ ([\s\S]*?) \} | (\}) ) \))
 		/mx;
-	    @_;
+	    $_[0];
 	};
 	$max_macro_growth = 10000;
 	$macro_start = '((?:^|\n)[^#\n]*?)';
@@ -834,19 +855,19 @@ C<ME<lt>> and C<E<gt>> delimit a macro call within a paragraph.
 		    (?:\A\n*|\n\n)= [\s\S]*?
 		    (\Z|\n\n=cut\b [\s\S]*? (?=\Z|\n\n))
 		/mx;
-	    @_;
+	    $_[0];
 	} : sub {
 	    if( $last_documents != $documents ) {
 		$last_documents = $documents;
 		$in_pod = 0;
 		$_[0] = "\n\n" . $_[0];
 	    } elsif( $in_pod ) {
-		return @_ unless $_[0] =~ /
-		    (?:\n\n)=(cut|for\s+perl)\b\s* ([\s\S]*?) \s*?(?=\Z|\n\n) |
-		    (?:\n\n)=begin\s+perl\b\s* ([\s\S]*?)
-			\s*?(?:\Z|\n\n=end\s+perl|(?=\n\n=cut\b)) |
-		    P<\{\s* ([\s\S]*?) \s*\}> | P<(\})> |
-		    P<\s* ([\s\S]*?) \s*>
+		return $_[0] unless $_[0] =~ /
+		    (?:\n\n)=(cut|for\s+perl)\b ([\s\S]*?) ?(?=\Z|\n\n) |
+		    (?:\n\n)=begin\s+perl\b ([\s\S]*?)
+			?(?:\Z|\n\n=end\s+perl|(?=\n\n=cut\b)) |
+		    P<\{ ([\s\S]*?) \}> | P<(\})> |
+		    P< ([\s\S]*?) >
 		/mx;
 		if( $1 eq 'cut' ) {
 		    $in_pod = 0;
@@ -903,9 +924,9 @@ is not a defined macro, it is left as an SGML entity.
 	$splitter = sub {
 	    return $`,  defined( $1 ) ? $1 :
 		($2 && ($3 ? "$2, '$3'" : "'\"', $2, '\"'")),
-		$4 || $5 || $6 || $7 || $8,  $'
+		$4 || $5 || $6 || $7 || $8,  $',  $&
 		if $_[0] =~ /
-		    ^<!--(?:(?!-->)[\s\S])*?-->$ \n? |
+		    $_[2]<!--(?:(?!-->)[\s\S])*?-->$_[3] |
 		    &<([\s\S]*?)>; |
 		    `([^<>]+?)`(\s*=)?(?=[^<>]*>) |
 		    <script\s[^>]*runat\s*=\s*[\'\"]?server\b.*?> ([\s\S]*?)
@@ -914,71 +935,52 @@ is not a defined macro, it is left as an SGML entity.
 		    <perl\b.*?> ([\s\S]*?) <\/perl> |
 		    <\{ ([\s\S]*?) \}> | <(\})>
 		/mix;
-	    @_;
+	    $_[0];
 	};
 	$macro_start = '&';
 	$macro_end = ';';
     }
 
 
-=item joiner => I<REGEXP>
+=item I<CODEREF>
 
-Sets I<REGEXP> (instead of C<\;>) to match what must be at the beginning or
-end of a bit of Perl to suppress the semicolon at that point.  Returns the old
-I<REGEXP>.
+B<NOTE: Since the parsing of a document has to be made more efficient, the way
+this I<CODEREF> works will be totally changed in the future.>
+
+Sets a function and returns the old one, which may have been a builtin one.
+
+The function gets four arguments, 0) a string containing the yet unparsed
+rest of the document, 1) a subregexp to match a beginning of line, 2) a
+subregexp to put before a comment matcher and 3) a subregexp to put after a
+comment matcher.  The regexps are only relevant if your style cares about
+beginnings of line or comments.  The comment regexps are provided depending on
+C<$comment_level>.  Regexps 1) and 2) also depend on whether the last match
+(optional 5th return value, see below) ended with a newline.  Otherwise the
+beginning of string will not match a beginning of line.
+
+It gets called repeatedly during parsing of a document and should return a
+list of 4 or 5 elements: 0) leading plain text, 1) printing Perl expr, 2)
+plain Perl, 3) the rest to be treated next time and optionally 4) the matched
+string or at least its last character.  Those elements not matching anything
+should be C<undef>, epsecially 1) since if it is the empty string, C<$_> will
+get printed at that point.  When it returns undef as the rest, it won't get
+called again for that document.
+
+=back
 
 =cut
 
-    elsif( $style eq 'joiner' ) {
-	$style = $orig_style;
-	my $old = $joiner;
-	$joiner = $_[0] if defined $_[0];
+    elsif( 'CODE' eq ref $style ) {
+	my $old = $splitter;
+	$splitter = $style;
+	$style = '<CODEREF>';
 	$old;
-    }
-
-
-=item splitter => I<SUB>
-
-Set a function that, given a string as often as there is still a rest of
-document, returns a list of 4 elements: 0) leading plain text, 1) printing
-Perl expr, 2) plain Perl and 3) the rest to be treated next time.  Those
-elements not matching anything should be C<undef>, epsecially 1) since if it
-is the empty string, C<$_> will get printed at that point.  Returns the old
-I<SUB>.
-
-=cut
-
-    elsif( $style eq 'splitter' ) {
-	$style = $orig_style;
-	my $old = $joiner;
-	$splitter = $_[0] if defined $_[0];
-	$old;
-    }
-
-
-=item macro => I<BEFORE>, I<AFTER>[, I<PAREN>]
-
-I<BEFORE> and I<AFTER> are regexps describing the syntactic sugar which is
-eliminated around macro invocations.  If, as in m4-style, I<BEFORE> has to
-look backwards, it should contain one paren-pair matching the portion of text
-not to discard, and I<PAREN> should then be true.
-
-=cut
-
-    elsif( $style eq 'macro' ) {
-	$style = $orig_style;
-	($macro_start, $macro_end, $macro_start_dollar1) = @_;
-    }
-
-    else {
+    } else {
 	die "unknown style '$style'";
     }
     '';
 }
 
-
-
-=back
 
 
 =item undefine I<EXPR>
@@ -1006,6 +1008,8 @@ sub undefine(;$) {
 
 __END__
 
+
+
 =head1 VARIABLES
 
 =over
@@ -1032,6 +1036,29 @@ Make C<include> cache the compiled form of the document for quick reuse when
 called again for the same file if C<true>.
 
 
+=item $comment_level
+
+What to do with comments in a document when compiling it.  Concerns comments
+in the host part (like C</* ... */> in cpp style), not Perl comments.  Values
+are:
+
+B<C<0>>:  Do not touch comments in document.
+
+B<C<1>>:  Remove comments in document, when they go exactly from a beginning of
+line to an end of line.
+
+B<C<2>>:  Like B<C<1>>, but there may be whitespace before the comment start or
+after the comment end.
+
+B<C<3>>:  Remove all comments in document.
+
+This may be hairy, since iPerl has no knowledge of the host document's syntax
+and will remove everything that looks like a comment.  In Perl or Korn shell,
+for example, C<#> does not start a comment in all syntactic contexts.  Or a C
+programme might contain C</* ... */> within a string.  That's why this
+variable defaults to C<1>, which is fairly safe.
+
+
 =item $debug
 
 Output the generated Perl program rather than executing it if C<true>.
@@ -1056,6 +1083,26 @@ the same directory as the file where C<include> was called.  Defaults to
 F</usr/include> followed by the contents of C<@INC>.
 
 
+=item $joiner
+
+Regexp (defaults to C<\;>) to match what must be at the beginning or end of a
+bit of Perl to suppress the semicolon at that point.
+
+
+=item $macro_end
+
+=item $macro_start
+
+=item $macro_start_dollar1
+
+C<$macro_start> and C<$macro_end> are regexps describing the syntactic sugar
+which is eliminated around macro invocations.  If, as in m4-style,
+C<$macro_start> has to look backwards, it should contain one paren-pair
+matching the portion of text not to discard, and C<$macro_start_dollar1>
+should then be true.  These change every time a C<set_style> is called
+explicitly or implicitly.
+
+
 =item $max_macro_growth
 
 One bit of plain text may grow by no more than this factor through macro
@@ -1078,9 +1125,17 @@ implementations use the C<-I> option for this.
 
 =item $preoutput_handler
 
+B<Not yet implemented.>
+
 Coderef called and reset every time iPerl wants to output a bit of plain text.
 Will normally be set by programmes to offer some initialization that can be
 overridden by the beginning of a document.
+
+
+=item $printfer
+
+Regexp (defaults to C<%>) to match what must be at the beginning of a printing
+bit of Perl to use printf instead of print.
 
 
 =item $style
@@ -1126,9 +1181,15 @@ there is none, we die.
 =back
 
 
+=item @_Text_iPerl
+
+Closure needed for internal purposes visible within your document.  The
+effects of changing this variable are not defined.
+
+
 =back
 
 
 =head1 SEE ALSO
 
-L<iperl>, L<web-iPerl>, L<perl>, http://beam.to/iPerl/
+L<iperl>, L<web-iPerl>, L<iPerl.el>, L<perl>, http://beam.to/iPerl/

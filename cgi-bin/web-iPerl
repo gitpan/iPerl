@@ -10,7 +10,7 @@
 use CGI qw':standard';
 use CGI::Carp qw'fatalsToBrowser';
 
-use Text::iPerl $VERSION = 0.52;
+use Text::iPerl $VERSION = 0.53;
 *header = \$Text::iPerl::header;
 
 my $type =
@@ -148,4 +148,4 @@ served.
 
 =head1 SEE ALSO
 
-L<Text::iPerl>, L<iperl>, L<perl>, http://beam.to/iPerl/
+L<Text::iPerl>, L<iperl>, L<iPerl.el>, L<perl>, http://beam.to/iPerl/

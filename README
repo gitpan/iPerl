@@ -1,4 +1,4 @@
-This is iPerl (inverse Perl) version 0.5
+This is iPerl (inverse Perl) version 0.53
 
 Copyright © 1999, Daniel Pfeiffer <occitan@esperanto.org>
 
@@ -9,6 +9,16 @@ Info and latest version are at http://beam.to/iPerl/
 
 This is still alpha beacause there is no Makefile.pl and line numbers of error
 messages are grossly misleading.  But the documented features are well tested.
+
+
+DESCRIPTION
+
+Perl-programmes may contain bits of string to be output, whereas inversely
+iPerl-documents consist of any kind of text to be output, and bits of
+specially marked Perl that control the document with conditionals or loops
+spanning text, subdocument-includes and macro definitions.  This is comparable
+to, but far more powerful than the C preprocessor or the m4 macro processor,
+but can also be seen as a template-mechanism.
 
 
 INSTALLATION

@@ -11,7 +11,7 @@ the GNU General Public License, which may be found in the Perl 5.0 source kit.
 Info and latest version are at http://beam.to/iPerl/
 ';
 
-use Text::iPerl $VERSION = 0.52;
+use Text::iPerl $VERSION = 0.53;
 
 package Text::iPerl;
 
@@ -66,7 +66,7 @@ GetOptions
     'c|cache' => sub { $cache = 1 },
 
 
-    'C|cpp' => sub { set_style 'cpp' },
+    'C|comment-level|comment_level:i' => sub { $comment_level = $_[1] },
 
 
     'control|control-chars|control_chars|ctrl' => sub { set_style 'control' },
@@ -83,12 +83,12 @@ GetOptions
 
 
     'e|eval=s' => sub {
-	eval $_[1];
-	if( $@ ) {
-	    $@ =~ s/\(eval .+\) line [0-9]+/option --eval/;
-	    die $@;
-	}
+	eval "#line 1 '--eval'\n$_[1]";
+	die $@ if $@;
     },
+
+
+    'E|cpp' => sub { set_style 'cpp' },
 
 
     'f|file|include=s' => sub { _include $_[1] },
@@ -149,6 +149,8 @@ GetOptions
 #  	    }
 #  	}
 #      },
+
+
     'O|output-rule|output_rule' => sub { $output_rule = 1 },
 
 
@@ -176,11 +178,12 @@ GetOptions
   -A, --auto, --autostyle
   -B, --bang, --unix
   -c, --cache
-  -C, --cpp
+  -C, --comment-level[ <flag>]
       --control, --control-chars, --ctrl
   -d, --debug
   -D, --define <macro>[=<definition>]
   -e, --eval <expr>
+  -E, --cpp
   -f, --file, --include <file>
   -G, --generic /<comment>/<print>/<printend>/<perl>/<perlend>/
   -i, --include-string <string>
@@ -223,6 +226,9 @@ If present, the environment variable C<$IPERL> is processed as though the
 parameters in it were given at the beginning of the command-line.  No Shell
 syntax is parsed, except that it is split on spaces.
 
+The options C<-C>, C<-D>, C<-E>, C<-I>, C<-o> and C<-U> are like in the C
+compiler or m4 macro processor.
+
 =over
 
 =item -A, --auto, --autostyle
@@ -244,10 +250,10 @@ Cache all files given on the command line or in include directives, such that
 they are not reread or recompiled when included again.
 
 
-=item -C, --cpp (default when called as cpp)
+=item -C, --comment-level[ I<flag>]
 
-Set style as in C preprocessor, i.e. lines of Perl begin with C<#> and
-defined macros have no syntactic sugar.
+Without flag do not discard comments.  If I<flag> is 2, discard even if there
+is whitespace before or after the comment.  If it is 3, discard all comments.
 
 
 =item --control, --control-chars, --ctrl
@@ -269,6 +275,12 @@ Define I<macro> as I<definition> or as 1 if none.
 =item -e, --eval I<expr>
 
 Evaluate I<expr> as a Perl programme.
+
+
+=item -E, --cpp (default when called as cpp)
+
+Set style as in C preprocessor, i.e. lines of Perl begin with C<#> and
+defined macros have no syntactic sugar.
 
 
 =item -f, --file, --include I<file>
@@ -372,4 +384,4 @@ specific to some style.
 
 =head1 SEE ALSO
 
-L<Text::iPerl>, L<web-iPerl>, L<perl>, http://beam.to/iPerl/
+L<Text::iPerl>, L<web-iPerl>, L<iPerl.el>, L<perl>, http://beam.to/iPerl/

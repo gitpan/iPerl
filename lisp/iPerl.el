@@ -14,7 +14,7 @@
 
 ;;; Commentary:
 
-;; This package is a minor mode for editing iPerl documents.
+;; This package is a minor mode for editing iPerl version 0.53 documents.
 
 ;;; Code:
 
@@ -105,6 +105,7 @@ There is no point in setting this if you use font-locking."
 
 ;;; keymaps:
 
+;;;###autoload
 (defcustom iPerl-map-prefix "\C-c!"
   "*Prefix key to use for iPerl commands in iPerl minor mode.
 You might set this to something like [f12] for a function key.
@@ -122,19 +123,20 @@ After that, changing the prefix key requires manipulating keymaps."
 (if iPerl-mode-map
     nil
   (setq iPerl-mode-map (make-sparse-keymap))
+  (define-key iPerl-mode-map "\C-\M-x" 'iPerl-on-region)
 
   (let ((map (make-sparse-keymap)))
     (define-key iPerl-mode-map iPerl-map-prefix map)
     (mapcar
      (lambda (item) (define-key map (car item) (cdr item)))
-     '(("@" . iPerl-mark-subtree)
-       ([right] . iPerl-forward)
+     '(([right] . iPerl-forward)
        ("\C-f" . iPerl-forward)
        ([left] . iPerl-backward)
        ("\C-b" . iPerl-backward)
        ("\C-p" . iPerl-hide-perl)
        ("\C-\M-p" . iPerl-hide-perl-and-markup)
        ("\M-p" . iPerl-hide-markup)
+       ("\M-m" . iPerl-hide-markup)
        ("\C-t" . iPerl-hide-text)
        ("\C-s" . iPerl-show-all)
        ("b" . iPerl-bit)
@@ -157,7 +159,11 @@ After that, changing the prefix key requires manipulating keymaps."
 		("Bit of Perl" . iPerl-bit)
 		("Long Bit of Perl" . iPerl-long-bit)
 		("Line of Perl" . iPerl-line)
-		("Printing Bit of Perl" . iPerl-printing-bit))))))
+		("Printing Bit of Perl" . iPerl-printing-bit)
+		("--" . 1)
+		("iperl on Region" . iPerl-on-region)
+		("Set Style" . iPerl-set-style)
+		("Toggle iPerl Mode" . iPerl-mode))))))
 
 (or (assq 'iPerl-mode minor-mode-map-alist)
     (setq minor-mode-map-alist
@@ -204,7 +210,7 @@ this gets transformed to a symbol as soon as it is used.")
 		"^=begin perl"	"^=end perl"
 		"^=for perl"	"\n\n\\|\\'")
     (sgml	"<perl>"	"</perl>"
-		"<script[^>]*\\s +runat\\s +=\\s +server[^>]*>" "</script>"
+		"<script[^>]*\\s +runat\\s *=\\s *server[^>]*>" "</script>"
 		"<server>"	"</server>"
 		"<{"		"}>"
 		"<}>"		1
@@ -231,6 +237,10 @@ end-regexp is quoted, the pair surrounds a printing bit of Perl."
   :group 'iPerl)
 
 
+(defvar iPerl-header-marker nil
+  "When non-`nil' is the end of header for prepending by \\[iPerl-on-region].
+That command is also used for setting this variable.")
+
 
 
 
@@ -249,8 +259,8 @@ And then for the rest there is the mode usually used by that document.  These
 parts, as well as the markup between them can be hidden, so as to allow
 concentrating on only one aspect or the other.  They are also graphically set
 apart with the faces `iPerl-text-face', `iPerl-markup-open-face',
-`iPerl-perl-face' and `iPerl-markup-close-face' to be distinguishable at a
-glance.
+`iPerl-perl-face', `iPerl-printing-perl-face' and `iPerl-markup-close-face' to
+be distinguishable at a glance.
 
 All standard styles are supported, and the markup between text and Perl can be
 automatically inserted in the syntax of the current style.  When you add
@@ -279,16 +289,30 @@ Info on iPerl and latest version are at http://beam.to/iPerl/"
 		  nil t)
 	(make-local-variable 'line-move-ignore-invisible)
 	(make-local-variable 'skeleton-further-elements)
-	(make-local-variable 'skeleton-filter)
 	(make-local-variable 'iPerl-style)
+	(make-local-variable 'iPerl-header-marker)
 	(setq line-move-ignore-invisible t
 	      skeleton-further-elements
-	        '((space '(if iPerl-skeleton-space ?\ )))
-	      skeleton-filter 'iPerl-by-style)
-	(or iPerl-style (call-interactively 'iPerl-set-style))
+	        '((space '(if iPerl-skeleton-space ?\ ))))
+	;; (buffer-local-variables &optional BUFFER)
+	(if (local-variable-p 'skeleton-filter)
+	    (progn
+	      (make-local-variable 'iPerl-skeleton-filter)
+	      (setq iPerl-skeleton-filter skeleton-filter
+		    skeleton-filter
+		      (lambda (alist)
+			(or (iPerl-by-style alist t)
+			    (funcall iPerl-skeleton-filter alist)))))
+	  (make-local-variable 'skeleton-filter)
+	  (setq skeleton-filter
+		  (lambda (alist)
+		    (or (iPerl-by-style alist t)
+			alist))))
+	(if iPerl-style
+	    (iPerl-set-style iPerl-style)
+	  (call-interactively 'iPerl-set-style))
 	(if (eq buffer-invisibility-spec t)
 	    (setq buffer-invisibility-spec))
-	(iPerl-add-overlays)
 	(run-hooks 'iPerl-minor-mode-hook))
     (save-restriction
       (widen)
@@ -303,9 +327,10 @@ Info on iPerl and latest version are at http://beam.to/iPerl/"
 	     (delete-overlay o)))
        (overlays-in (point-min) (point-max))))
     (setq line-move-ignore-invisible nil)
-    (remove-from-invisibility-spec iPerl-categories))
-  (force-mode-line-update))
+    (remove-from-invisibility-spec iPerl-categories)
+    (force-mode-line-update)))
 
+;;;###autoload
 (defun iPerl-mode-if-style ()
   "Turn on iPerl-mode if `iPerl-style' is set.
 This can be added to `change-major-mode-hook' for files that have this in
@@ -323,7 +348,13 @@ their local variables section."
 				   ("pod") ("sgml") ("unix"))
 				 nil t)))
      (if (string= style "") '("bang") (list style))))
-  (setq iPerl-style style))
+  (mapcar
+   (lambda (o)
+     (if (memq (overlay-get o 'category) iPerl-categories)
+	 (delete-overlay o)))
+   (overlays-in (point-min) (point-max)))
+  (setq iPerl-style style)
+  (iPerl-add-overlays))
 
 (defun iPerl-by-style (alist &optional noerr)
   ;; choose from ALIST by iPerl-style, possibly helped by iPerl-style-equiv
@@ -332,8 +363,9 @@ their local variables section."
   (or (assq iPerl-style alist)
       (if (assq iPerl-style iPerl-style-equiv)
 	  (assq (cdr (assq iPerl-style iPerl-style-equiv)) alist))
-      noerr
-      (error "Not defined for style \"%s\"." iPerl-style)))
+      (if noerr
+	  ()
+	(error "Not defined for style \"%s\"." iPerl-style))))
 
 
 
@@ -400,8 +432,10 @@ their local variables section."
 			     'iPerl-markup-close))
 	    (setq p (match-end 0)))))
       (iPerl-overlay p (point-max) 'iPerl-text t)
-      (set-buffer-modified-p modified))
-    (run-hooks 'iPerl-view-change-hook)))
+      (or modified
+	  (set-buffer-modified-p nil)))
+    (run-hooks 'iPerl-view-change-hook))
+  (force-mode-line-update))
 
 
 
@@ -507,6 +541,35 @@ See `iPerl-intangible-when-hidden'."
 
 
 
+(defun iPerl-on-region (start end &optional flag)
+  "Pass optional header and region to iperl interpreter.
+The header feature is for adding defines, includes and such to the region.
+With a positive prefix ARG, instead of sending region, define header from
+beginning of buffer to point.  With a negative prefix ARG, instead of sending
+region, clear header."
+  (interactive "r\nP")
+  (if flag
+      (setq iPerl-header-marker (if (> (prefix-numeric-value flag) 0)
+				    (point-marker)))
+    (if (and iPerl-header-marker (< iPerl-header-marker start))
+	(save-excursion
+	  (let (buffer-undo-list
+		(modified (buffer-modified-p)))
+	    (goto-char iPerl-header-marker)
+	    (append-to-buffer (current-buffer) start end)
+	    (shell-command-on-region (point-min)
+				     (setq end (+ iPerl-header-marker
+						  (- end start)))
+				     (format "iperl --%s" iPerl-style))
+	    (delete-region iPerl-header-marker end)
+	    (or modified
+		(set-buffer-modified-p nil))))
+      (if iPerl-header-marker
+	  (setq start (point-min)))
+      (shell-command-on-region start end (format "iperl --%s" iPerl-style)))))
+
+
+
 ;; Function to be set as an iPerl-isearch-open-invisible' property
 ;; to the overlay that makes the iPerl invisible.
 (defun iPerl-isearch-open-invisible (overlay)
@@ -564,3 +627,62 @@ See `iPerl-skeleton-space'."
   (pod () "=for perl" space))
 
 (provide 'iPerl)
+
+
+
+[					; lisp half ignores POD this way
+
+=head1 NAME
+
+iPerl.el - Edit iPerl documents
+with comfortable support in Emacs
+
+
+=head1 DESCRIPTION
+
+This library allows editing iPerl documents in two modes simultaneously.
+There is the major mode for the host document.  And then there is iPerl minor
+mode, which will enhance the current major mode.  The bits of markup and
+Perl in your document are edited in Perl or CPerl mode.  The menus and
+keybindings change automatically when the cursor is on a bit of Perl.
+
+And, so you see what you are doing, markup, plain bits and printing bits of
+Perl are each highlighted in a different color, and you can make markup and/or
+Perl or the rest of the text invisible so as to concentrate on one aspect of
+your document or the other.
+
+The documentation for this is all in the Emacs help system.  As a good entry
+point (if the minor mode is active) click Describe Buffer Modes from the Help
+menu.  Or use Describe Function... and type in C<iPerl-mode>.
+
+
+
+=head1 INSTALLATION
+
+Click Describe Buffer Modes from the Help menu and type in C<load-path>.  You
+get a list of directories where Emacs looks for libraries.  You should copy
+F<lisp/iPerl.elc> and optionally the source file F<lisp/iPerl.el> to one of
+them.  The directory containing F<site-lisp> is foreseen for this.
+
+In your file F<~/.emacs> add the following:
+
+  (setq iPerl-map-prefix "\C-c!")
+  (setq iPerl-map-prefix [f12])
+
+  (let ((map (make-sparse-keymap)))
+    (define-key map "\C-m" 'iPerl-mode)
+    (global-set-key iPerl-map-prefix map))
+
+  (autoload 'iPerl-mode "iPerl" "Toggle iPerl minor mode." t nil)
+
+Of the first two lines you can chose one or the other.  The first one means,
+that the key sequence C<C-c ! C-m> (that's C<control-C ! control-M>) will
+activate and deactivate iPerl minor mode.  The second more conveniently means
+that C<f12 C-m> (that's C<F12 control-M>) will do it.
+
+
+=head1 SEE ALSO
+
+L<Text::iPerl>, L<iperl>, L<web-iPerl>, L<emacs>, L<perl>, http://beam.to/iPerl/
+
+=cut ]
