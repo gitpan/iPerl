@@ -1,0 +1,37 @@
+This is iPerl (inverse Perl) version 0.5
+
+Copyright © 1999, Daniel Pfeiffer <occitan@esperanto.org>
+
+iPerl may be copied only under the terms of either the Artistic License or
+the GNU General Public License, which may be found in the Perl 5.0 source kit.
+
+Info and latest version are at http://beam.to/iPerl/
+
+This is still alpha beacause there is no Makefile.pl and line numbers of error
+messages are grossly misleading.  But the documented features are well tested.
+
+
+INSTALLATION
+
+Copy Text/iPerl.pm to the Text subdirectory in one of the directories shown as
+@INC in the output of perl -V.
+
+Copy bin/iPerl to some directory shown by echo $PATH.
+
+Copy lisp/iPerl.elc to some directory shown by Emacs with F1 v load-path,
+preferably one ending in site-lisp.
+
+Copy cgi-bin/web-iPerl to the cgi-bin directory of your web-server and
+instruct it to pass files with a special ending (e.g. *.phtml) to that script.
+For Apache this can be achieved by putting into conf/httpd.conf the following
+lines:
+
+  AddType application/x-web-iPerl phtml psgml pxml ptxt putxt pps
+  AddType application/x-web-iPerl pht psg pxm ptx put
+  Action application/x-web-iPerl /cgi-bin/web-iPerl
+
+  DirectoryIndex index.html index.htm index.phtml index.pht
+
+For further information extract the documentation with pod2text or pod2html
+from the three files or study the examples.  The doc can also be read on the
+web-site.

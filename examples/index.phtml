@@ -1,0 +1,80 @@
+<html>
+<head>
+<script runat=server language=perl>
+  my $dir = $ENV{PATH_INFO};
+  $dir =~ s![^/]*$!!;		# strip off 'index.phtml'
+</script>
+  <title>Index of &<$dir>;</title> 
+<body>
+<h1>Index of &<$dir>;<h1>
+
+<table>
+<tr><th>File<th>Size<th colspan=2>Last Modification<th>Title
+<script runat=server language=perl>
+  if( $dir ne '/' ) {
+</script>
+<tr><td><a href="../"><b>Up one level</b></a><td><td>
+<script runat=server language=perl>
+  }
+
+  define title => sub {
+    if( -d _ ) {
+      open FILE, <$_/index.*htm*>;
+    } elsif( /html?.?$/ ) {
+      open FILE, $_;
+    } else {
+      return '';
+    }
+    local $/ = undef;
+    my( $title ) = <FILE> =~ m!<(?:title|h1)\b.*?>(.*)</(?:title|h1)>!i;
+    close FILE;
+    return $title;
+  };
+
+  opendir DIR, '.';
+  foreach( sort { lc $a cmp lc $b } grep !/^\.|~$|^#.+#$|^index.pht(ml)?$/, readdir DIR ) {
+    next unless -r $_;
+    my( $size, $mtime ) = (stat _)[7,9];
+    $mtime = localtime $mtime;
+    $mdate = substr( $mtime, 4, 7 ) . substr( $mtime, -4 );
+    $mtime = substr( $mtime, 11, 5 );
+    if( -d _ ) {
+</script>
+<tr><td><a href="&<>;/"><b>&<>;/</b></a><td>
+<script runat=server language=perl>
+    } else {
+</script>
+<tr><td><a href="&<>;">&<>;</a><td align=right>&<$size>;
+<script runat=server language=perl>
+    }
+</script>
+<td align=right><i>&<$mtime>;,</i><td align=right><i>&<$mdate>;</i>
+<td> <b>&title;</b>
+<script runat=server language=perl>
+  }
+</script>
+</table>
+</html>
+<!--
+
+=head1 NAME
+
+index.phtml - display an index of the current directory
+
+=head1 SYNOPSIS
+
+On a L<web-iPerl> enabled server copy to some directory.
+
+=head1 DESCRIPTION
+
+Simple index-generator that filters out hidden and unreadable files, as well
+as itself and Emacs backups and autosaves.  Fetches the title from HTML-files
+and index of subdirectories.  Doesn't give visual clues in the form of icons,
+but avoids an up link when at the top of the directory hierarchy.
+
+
+=head1 SEE ALSO
+
+L<Text::iPerl>, L<iperl>, L<web-iPerl>, L<perl>, http://beam.to/iPerl/
+
+=cut -->
