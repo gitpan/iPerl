@@ -1,5 +1,7 @@
 # the iPerl engine Text::iPerl.pm
 #
+# Inverse Perl Preprocessor for Arbitrary Documents
+#
 # Copyright © 1999, 2000, Daniel Pfeiffer <occitan@esperanto.org>
 #
 # iPerl may be copied only under the terms of either the Artistic License or
@@ -32,7 +34,7 @@ effect.  (See C<set_style>.)  The engine is invoked with C<include>, or its
 variants C<include_filehandle> and C<include_string>.  It treats a given
 document in two phases, with two or three aspects:
 
-=head2 Markup style
+=head2 Markup Style
 
 Bits of Perl to be evaluated have to be specially marked up as such.  How this
 is done differs greatly depending on the style in effect.  But apart from
@@ -57,8 +59,8 @@ a bit of non-printing Perl containing only a semicolon.
 
 Printing bits of Perl, on the other hand, get passed as an argument list to a
 print statement, or to printf, if it starts with C<%>.  If a printing bit of
-Perl is empty, C<$_> is printed.  If it is a literal integer, C<$_[I<n>]> is
-printed.
+Perl is empty, C<$_> is printed.  If it is a literal integer,
+C<$_[I<n>]> is printed.
 
 There are several interesting things you can do with syntactically incomplete
 bits of Perl.  You can seal the fate of the following bit of plain text by
@@ -87,9 +89,12 @@ second part of a macro name together with the preceding text, that is not
 found.  (See C<define>, C<undefine> & C<macro>.)
 
 Macro invocations consist of the macro name, a string of letters, digits and
-underscores, optionally immediately followed by a parenthesized Perl parameter
-list.  Depending on the style, macro invocations may be surrounded by
-additional syntactic sugar.
+underscores, optionally usually immediately followed by a parenthesized Perl
+parameter list.  Note that even if the macro is surrounded by a bit of Perl
+with a C<my>-variable, that variable will not be visible, since macro
+invocations are evaluated later, not seen at compile time.  Depending on the
+style, macro invocations may be surrounded by additional syntactic sugar.
+(See C<$macro_start> and friends.)
 
 =head1 @EXPORT
 
@@ -102,12 +107,16 @@ C<macro>
 
 Text::iPerl optionally exports the following function and variables:
 
-C<set_style>, C<$cache>, C<$debug>, C<$documents>, C<@documents>, C<$header>,
-C<$max_macro_growth>, C<$max_macro_expansions>
+C<set_style>, C<$cache>, C<$comment_level>, C<debug>, C<%debug>, C<$documents>,
+C<@documents>, C<$joiner>, C<$macro_end>, C<$macro_name_end>, C<$macro_start>,
+C<$macro_start_dollar1>, C<$max_macro_growth>, C<$max_macro_expansions>,
+C<$printfer>, C<%trace>
 
 =cut
 
+
 
+
 
 package Text::iPerl;
 
@@ -117,10 +126,11 @@ use Exporter;
 @ISA = qw(Exporter);
 @EXPORT = qw(include include_string define undefine macro);
 @EXPORT_OK = qw(set_style $style @autostyle_by_name @autostyle_by_contents
-		$cache $debug $documents @documents $header $max_macro_growth
-		$max_macro_expansions $macro_start_dollar1 $macro_start
-		$macro_end $comment_level $joiner $printfer);
-$VERSION = 0.53;
+		$cache debug %debug $documents @documents $header
+		$max_macro_growth $max_macro_expansions $macro_start_dollar1
+		$macro_start $macro_name_end $macro_end $comment_level $joiner
+		$printfer %trace);
+$VERSION = 0.6;
 
 
 @include = ('/usr/include', @INC);
@@ -130,16 +140,18 @@ $style = 'auto';
     ('\.(?:p[cChH]|p[ch]pp|[cChH]p?|[ch]ppp?)$' => cpp,
      '\.(?:pm[4c]|m[4c]p?)$' => m4,
      '\.(?:ppod|podp?|pm|pl)$' => pod,
-     '\.(?:p(?:sg|ht|w|x)ml|(?:sg|ht|w|x)mlp?)$' => sgml);
+     '\.(?:p(?:sg|ht|w|x)ml|(?:sg|ht|w|x)mlp?)$' => xml);
 @autostyle_by_contents =
     ('^|[][\s\S]*' => control,
-     '<script\s[^>]*runat\s*=\s*[\'\"]?server\b.*?>|<(?:server|perl)\b.*?>' => sgml,
+     '<script\s[^>]*runat\s*=\s*[\'\"]?server\b.*?>|<(?:server|perl)\b.*?>' =>
+	xml,
      'perl\((?:<\s*[\s\S]*?\s*>|\{\s*[\s\S]*?\s*\}|\})\)' => m4,
      '^=perl\b|[PM]<[\s\S]*?>' => pod,
-     '<\{[\s\S]*?\}>' => sgml,
+     '<\{[\s\S]*?\}>' => xml,
      '!\{[\s\S]*?\}!|!<[\s\S]*?>!|^!' => bang,
      '^#' => cpp);
 
+$cache = 1;
 $comment_level = 1;
 
 $max_macro_expansions = $max_macro_growth = 1000;
@@ -147,17 +159,17 @@ $max_macro_expansions = $max_macro_growth = 1000;
 $joiner = '\\\\;';
 $printfer = '%';
 
-$package = '';
+$documents = 0;
+@documents = ();
 
-
-
-sub compile(;$$$);
-
+sub debug($$);
+sub set_style($;@);
 
 
 # internal utilities
 
-sub case($@) {
+
+sub _case($@) {
     my( $str, @conds ) = @_;
     while( @conds ) {
 	return $conds[1] if
@@ -167,22 +179,247 @@ sub case($@) {
     undef;
 }
 
+
+
+sub _compile($$) {
+    local $prog = '';		# locals don't do closure in eval
+    my @_Text_iPerl;
+    local( $style, $macro_start, $macro_name_end, $macro_end,
+	   $macro_start_dollar1, $splitter ) =
+	( $style, $macro_start, $macro_name_end, $macro_end,
+	  $macro_start_dollar1, $splitter );
+    {
+	my $string = @_ ? $_[0] : $_;
+	if( $style =~ /^auto/ ) {
+	    my $orig_style = $style;
+	    my $det_style =
+		($string =~
+		    /\A(?:\#!.+\n)?
+		     .*-\*-.*\b iPerl-style:\s*"(.+?)" .*-\*-/mx) ? $1 :
+		(substr( $string, -3000 ) =~
+		    /^(.*?)[ \t]* Local\ Variables: [ \t]*(.*)$
+		     (?:^\1 .+ \2\n)*?
+		     ^\1[ \t]* iPerl-style:\s*"(.+?)" [ \t]*\2$
+		     (?:^\1 .+ \2\n)*?
+		     ^\1[ \t]* End: [ \t]*\2$
+		     (?:(?!\n).)*\Z/mx) ? $3 :
+		_case( $_[1], @autostyle_by_name ) ||
+		_case( $string, @autostyle_by_contents );
+	    if( $det_style ) {
+		set_style $det_style;
+		$style = "auto: $style";
+	    } elsif( $orig_style eq 'auto' ) {
+		die "No style determined for $_[1]";
+	    }
+	}
+	my( $bol, $length, $text, @res ) = 1;
+	while( 1 ) {
+	    @res = &$splitter( $string,
+			       $bol ? '^' : '(?!\A)^',
+			       ${['\Z',
+				  $bol ? '^' : '(?!\A)^',
+				  $bol ? '^[^\S\n]*' : '(?!\A)^[^\S\n]*',
+				  '']}[$comment_level],
+			       ${['',
+				  '$ \n?',
+				  '[^\S\n]*$ \n?',
+				  '']}[$comment_level] );
+	    for( $res[0] ) {
+		next unless defined and $length = length;
+		$text = ( $length < 20 and ! /[\\']/ ) ?
+		    "'$_'" :
+		    ('$_Text_iPerl[' .
+		     (push( @_Text_iPerl, $_ ) - 1) .
+		     ']');
+		$prog .= (/[a-zA-Z0-9_]/ ?
+		    'Text::iPerl::_output ' :
+		    'print ') . $text . ';';
+	    }
+	    for( $res[1] ) {
+		next unless defined;
+		/\A\s*($printfer\s*)?(.*?)\s*\Z/s;
+		$prog .= 'print' . ($1 ? 'f' : '') . ' STDOUT (' .
+		    ($2 eq int( $2 ) ? "\$_[$2]" : $2 || '$_') ."\n);";
+	    }
+	    for( $res[2] ) {
+		next unless defined;
+		/\A\s*($joiner\s*)?(.*?)\s*($joiner\s*)?\Z/s;
+		chop $prog if defined $1 && ';' eq substr $prog, -1, 1;
+		$prog .= defined $3 ? " $2 " : " $2\n;";
+	    }
+	last unless defined $res[3];
+	    $string = $res[3];
+	    $bol = defined $res[4] && "\n" eq substr $res[4], -1, 1;
+	}
+    }
+    debug c => sub {
+	print "Generated code: {\n\$style = '$style';\n\n";
+	my $j = 0;
+	foreach( @_Text_iPerl ) {
+	    local $_ = $_;
+	    s/\\/\\\\/g;
+	    s/'/\\'/g;
+	    print "my \$_Text_iPerl[$j] = '$_';\n\n";
+	    $j++;
+	}
+	print "\f\n$prog\n} # Generated code\n";
+    };
+
+    push @_Text_iPerl,
+	$macro_start, $macro_name_end, $macro_end, $splitter, $_[1];
+    $prog = qq{
+	local( \$style, \$macro_start_dollar1,
+	       \$macro_start, \$macro_name_end, \$macro_end,
+	       \$splitter ) =
+	    ( '$style', $macro_start_dollar1, \@_Text_iPerl[-5..-2] );
+	push \@documents, \$_Text_iPerl[-1];
+#line 1 '$_[1]'
+	$prog
+    };
+    if( $cache and $prog !~ /\bsub\b/ ) {	# $] >= 5.099
+	# Fixed nested closure when? (see comp.lang.perl.misc 2000-07-22)
+	$prog = eval "sub{$prog}";
+	die $@ if $@;
+    } else {
+	$prog = [$prog, @_Text_iPerl];
+    }
+    $prog;
+}
+
+
+
 sub _eval($) {
 #local $^W=1;
-    my $result = eval( $package ? "package $package; $_[0]" : $_[0] );
+    {
+	my $package = caller 1;
+	$_[0] = "package $package; $_[0]";
+	debug E => $_[0];
+    }
+    my $result = eval $_[0];
     die $@ if $@;
     $result;
 }
 
-sub set_style($;@);
 
 
-# Most functions which don't return anything meaningful, explicitly return
-# '', so as to be useable as (or - like output - implicitly in) a macro.
+sub _output($) {
+    if( defined $header ) {
+	print $header;
+	undef $header;
+    }
+    my( $string ) = @_;
+    if( $defines ) {
+	my( $i, $length, $args ) = ( 0, 0, '' );
+	my $max_length = $max_macro_growth * length $string;
+	my( $macro, $post );
+	local $macrodef;
+	while( $string =~
+	       /$macro_start($defines)$macro_name_end(\(.*?\))?($macro_end)/s )
+	{
+	    print $`;
+	    $length += length $`;
+	    if( $macro_start_dollar1 ) {
+		print $1;
+		$length += length $1;
+		$macro = $2;
+		$args = $3; $end = $4;
+	    } else {
+		$macro = $1;
+		$args = $2; $end = $3;
+	    }
+	    $post = $';
+	    $macrodef = $defines{$macro};
+	    $macrodef = $defines{$$macrodef} || $$macrodef
+		while defined ref $macrodef and ref( $macrodef ) eq 'SCALAR';
+	    while( (!$end) && $args =~ tr/(/(/ > $args =~ tr/)/)/ ) {
+		$post =~ /^(.*?\))($macro_end)/s or
+		    die "missing ')' for inlined macro ``$macro''";
+		$args .= $1; $end = $2; $post = $';
+	    }
+	    $args ||= '()';
+	    $package = caller;
+	    $macrodef = _eval "\n#line 0 'inlined macro \"$macro\"'\n" .
+		(ref( $macrodef ) ?
+		 "&\$Text::iPerl::macrodef$args" :
+		 "$macrodef$args");
+	    $string = $macrodef . $post;
+	    debug \$macro => sub {
+		print $macro . (($debug{V} || $debug{a}) && $args) .
+		    (($debug{V} || $debug{e}) && " -> $macrodef") .
+		    "\n";
+	    };
+	    die 'Factor $Text::iPerl::max_macro_growth exceeded'
+		if $max_length < $length + length $string;
+	    die '$Text::iPerl::max_macro_expansions exceeded'
+		if $max_macro_expansions < ++$i;
+	}
+    }
+    print $string;
+    '';
+}
+
+
+
+sub _run($) {
+    debug i => (caller 1)[3] . ":@documents";
+    $documents++;
+    local @documents = @documents;
+    if( 'CODE' eq ref $_[0] ) {
+	&{$_[0]};
+    } else {
+	my @_Text_iPerl = @{$_[0]};
+	eval shift @_Text_iPerl;
+	die $@ if $@;
+    }
+    '';
+}
+
+
+
+
+
+# Most functions which don't return anything meaningful, explicitly return '',
+# so as to be useable as (or - like _output & _run - implicitly in) a macro.
 
 =head1 FUNCTIONS
 
 =over
+
+=item debug WHEN, STRING
+
+=item debug WHEN, CODEREF
+
+=cut
+
+sub debug($$) {
+    return '' unless %debug || %trace;
+    my( $when, $what ) = @_;
+    return '' unless $debug{V}
+	or ref( $when ) ? $debug{t} || $trace{${$when}} : $debug{$when};
+    my $oldfh = select STDERR;
+    my $msg = 'iPerl-debug:';
+    if( $debug{F} || $debug{V} ) {
+	$msg .= ($documents[-1] || (caller 1)[1]) . ':';
+    } elsif( $debug{f} ) {
+	my $file = $documents[-1] || (caller 1)[1];
+	$file =~ s!.*/!!;
+	$msg .= $file . ':';
+    } elsif( $debug{L} ) {
+	my @caller = (caller 0)[0..2];
+	push @caller, (caller 1)[3..5];
+	$msg .= "@caller:";
+    }
+    if( ref $what ) {
+	print "$msg ";
+	&{$what}( @rest );
+    } elsif( $what ) {
+	print "$msg $what\n";
+    }
+    select $oldfh;
+    '';
+}
+
+
 
 =item define I<STRING>, I<EXPR>
 
@@ -192,18 +429,18 @@ sub set_style($;@);
 
 Defines a macro whose value may be interpolated into bits of plain text in
 scalar context.  I<STRING> or C<$_> should be a string consisting of letters,
-digits and underscores, which is the name of the macro.  I<EXPR>
-is the body of the macro.  If it is a reference to a function the macro
-interpolation will call that.  If it is a string-reference the macro is an
-alias to that macro or to that Perl-builtin, which doesn't allow a function
-reference to be taken.  If it is missing, the macro is a
-soft reference to a Perl-function of the same name.
+digits and underscores, which is the name of the macro.  I<EXPR> is the body
+of the macro.  If it is a reference to a function the macro interpolation will
+call that.  If it is a string-reference the macro is an alias to that macro or
+to that Perl-builtin, which doesn't allow a function reference to be taken.
+If it is missing, the macro is a soft reference to a Perl-function of the same
+name.
 
 If the second argument is a string (should be single-quoted), its variables
 will be interpolated at the moment the macro gets called.  The macro arguments
 may of course be accessed as C<'... $_[0] ... $_[1] ...'>, but there is a more
 comfortable possibility.  The first argument to C<define> may contain
-parameter specifications in parantheses after the name.  These are a comma
+parameter specifications in parentheses after the name.  These are a comma
 separated list of scalar variables with optionally a list variable at the end.
 Each of these variables may be assigned to, giving the named parameter a
 default value.
@@ -211,18 +448,33 @@ default value.
 For styles like C<cpp> which don't allow embedding Perl-expressions into the
 document, you can use any one of the following to get a Perl-evaluating macro:
 
-  define PERL => sub { $_[0] };
   define PERL => '@_';
   define 'PERL( $eval = $_ )', '$eval';
+  define PERL => sub { $_[0] };
+  define PERL => sub { print $_[0]; '' };
+
+The first allows multiple arguments, to be separated by C<$">.  The second
+gives a Perl-typical default argument of C<$_>.  The third simply evaluates
+one argument.  The fourth does the same, but, the value being printed, it will
+not be reparsed for further macro-invocations.
 
 =cut
 
 sub define(;$$) {
-    my( $macro, $args ) = split /(?=[^a-zA-Z0-9_])/, $_[0], 2;
-    $macro = $_ unless $macro;
-    my $str = $_[1];
+    my( $macro, $str, $args ) = @_ ? @_ : $_;
+    ( $macro, $args ) = split /(?=[^a-zA-Z0-9_])/, $macro, 2
+	if my $havestr = (1 < @_);
+    debug \$macro => sub {
+	print "define $macro" . (($debug{V} || $debug{a}) && $args) .
+	    (($debug{V} || $debug{e}) && $havestr ? " -> $str" : ' <-') .
+	    "\n";
+    };
+    $defines .= ($defines && '|') . $macro
+	unless $defines{$macro};
     if( ref $str ) {
 	$defines{$macro} = $str;
+    } elsif( ! $havestr ) {
+	$defines{$macro} = $macro;
     } elsif( defined $args ) {
 	$args =~ s/^\s*\(\s*(.*)\s*\)\s*$/$1/;
 	my @defaults;
@@ -241,20 +493,18 @@ sub define(;$$) {
 	}
 	if( defined $str ) {
 	    $str =~ s/"/\\"/g;
-	    $defines{$macro} = _eval "sub {
+	    $defines{$macro} = _eval qq{sub {
 		$args
 		@defaults
-		\"$str\"
-	    }";
+		"$str"
+	    }};
 	}
     } elsif( defined $str ) {
 	$str =~ s/"/\\"/g;
-	$defines{$macro} = _eval "sub {
-	    \"$str\"
-	}";
+	$defines{$macro} = _eval qq{sub {
+	    "$str"
+	}};
     }
-    $defines .= ($defines && '|') . $macro
-	unless $defines =~ /(?:^|\|)$macro(?:\||$)/;
     '';
 }
 
@@ -269,10 +519,12 @@ sub define(;$$) {
 =item include
 
 Includes a document, parsing it as iPerl and merging the result into the
-current output.  If no filename is given, reads from C<STDIN>.  If called from
-within a known file, the file is searched in the directory of that
-document, else in the current directory.  If it is not found there, the
-directories in C<@opt_I> followed by those in C<@include> are searched.
+current output.  I<EXPR> works just like in C<open>.  If no filename is given,
+reads from C<STDIN>.  If filename is not a full path, then if called from
+within a known file, the file is searched in the directory of that document,
+else in the current directory.  If it is not found there, the directories in
+C<@opt_I> followed by those in C<@include> are searched, unless filename
+starts with F<./>.
 
 The second argument may be an integer (often C<1>), meaning to include the
 file only if that filename hasn't already been included that many times.
@@ -284,18 +536,30 @@ filename.
 The third argument, when true, means to continue silently when the file was
 not found.
 
+Note that include is simply a Perl function, thus a run-time affair.  This
+means that if you define any functions within the included document, they are
+not known within the including one.  You can either mark them as such for the
+compiler (ampersand and/or parens) or you can place the include statement
+within a C<BEGIN {}> block.
+
 =cut
 
 sub include(;$$$) {
     my( $file, $count, $hush ) = @_;
     my $string;
-    if( defined( $file ) && $file ) {
+    if( !defined $file or $file eq '-' ) {
+	$file = '<STDIN>';
+	return _run $cache{$file}
+	    if $cache && defined $cache{$file};
+	local $/ = undef;
+	$string = <STDIN>;
+    } else {
 	my @include = (@opt_I, @include);
 	if( ref $file ) {
 	    $file = $$file;
-	} elsif( $file =~ /^\// ) {
+	} elsif( $file =~ /^<?\s*\// ) {
 	    goto CHECK;
-	} elsif( $file =~ /^<&|\|$/ ) {
+	} elsif( $file =~ /^<?\s*\.\/|^<\s*&|\|$/ ) {
 	    goto READ;
 	} else {
 	    my $dir;
@@ -308,7 +572,13 @@ sub include(;$$$) {
 	}
 	$file =~ s/^<\s*//;
 	foreach( @include ) {
-	    next unless -f( $_ .= "/$file" );
+	    $_ .= "/$file";
+	    if( -f ) {
+		debug p => "Found file $_";
+	    } else {
+		debug p => "Tried file $_";
+		next;
+	    }
 	    $file = $_;
 	    last;
 	}
@@ -322,9 +592,13 @@ sub include(;$$$) {
 	}
 	$refcount{$ref}++;
 	$count{$file}++;
-	if( $cache && defined $cache{$file} ) {
-	    &{$cache{$file}};
-	    return '';
+	if( $cache ) {
+	    $cache{$file} = ''
+		if defined $cachetime{$file}
+		and $cachetime{$file} < (stat _)[9];
+	    $cachetime{$file} = (stat _)[9];
+	    return _run $cache{$file}
+		if defined $cache{$file};
 	}
       READ:
 	local $/ = undef;
@@ -338,20 +612,11 @@ sub include(;$$$) {
 	}
 	$string = <FILE>;
 	close FILE;
-    } else {
-	$file = '<STDIN>';
-	if( $cache && defined $cache{$file} ) {
-	    &{$cache{$file}};
-	    return '';
-	}
-	local $/ = undef;
-	$string = <STDIN>;
     }
-    &{$string = compile $string, caller, $file};
-    $cache{$file} = $string if $cache;
-    '';
+    _run( $cache ?
+	  $cache{$file} = _compile $string, $file :
+	  _compile $string, $file );
 }
-
 
 
 =item include_filehandle I<FILEHANDLE>
@@ -367,12 +632,11 @@ Likewise, but reads from the I<FILEHANDLE>.
 =cut
 
 sub IO::Handle::include_filehandle(*) {
-    &{compile do {{		# 'do' in 5.004 ignores 'local'
+    _run _compile do {{		# 'do' in 5.004 ignores 'local'
 	local *FH = $_[0];
 	local $/ = undef;
 	<FH>;
-    }}, caller, '<FILEHANDLE>'};
-    '';
+    }}, '<FILEHANDLE>';
 }
 
 
@@ -386,11 +650,9 @@ Likewise, but parses I<EXPR> or C<$_> if none.
 =cut
 
 
-sub include_string(;$$$) {
-    &{compile @_ ? $_[0] : $_,
-	  $_[1] || caller,
-	  $_[2] || '<STRING>'};
-    '';
+sub include_string(;$$) {
+    _run _compile @_ ? $_[0] : $_,
+	  $_[1] || '<STRING>';
 }
 
 
@@ -410,172 +672,13 @@ Perl function.  Without an argument returns the list of defined macro-names.
 
 sub macro(;$) {
     if( @_ ) {
-	return $defines{$_[0]} if $defines{$_[0]};
-	return $_[0] if $defines =~ /(?:^|\|)$_[0](?:\||$)/;
+	return $defines{$_[0]} if defined $defines{$_[0]};
 	undef;
     } else {
-	return sort split /\|/, $defines;
+	return sort keys %defines;
     }
 }
 
-
-
-sub output($) {
-    if( defined $header ) {
-	print $header;
-	undef $header;
-    }
-    my $string = $_[0];
-    if( $defines ) {
-	my $i = 0;
-	my $max_length = $max_macro_growth * length $string;
-	my( $length, $args, $post ) = ( 0, '' );
-	local $macro;
-	while( $string =~ /$macro_start\b($defines)\b(\(.*?\))?($macro_end)/s )
-	{
-	    print $`;
-	    $length += length $`;
-	    if( $macro_start_dollar1 ) {
-		print $1;
-		$length += length $1;
-		$macro = $defines{$2} || $2;
-		$args = $3; $end = $4;
-	    } else {
-		$macro = $defines{$1} || $1;
-		$args = $2; $end = $3;
-	    }
-	    $post = $';
-	    $macro = $defines{$$macro} || $$macro
-		while ref( $macro ) eq 'SCALAR';
-	    while( (!$end) && $args =~ tr/(/(/ > $args =~ tr/)/)/ ) {
-		$post =~ /^(.*?\))($macro_end)/s or
-		    die "missing ')' for inlined macro ``$macro''";
-		$args .= $1; $end = $2; $post = $';
-	    }
-#	    $args = substr $args, 1, -1 if $args;
-	    $args ||= '()';
-	    $package = caller;
-	    $macro = _eval "\n#line 0 'inlined macro \"$macro\"'\n" .
-		(ref( $macro ) ?
-		 "&\$Text::iPerl::macro$args" :
-		 "$macro$args");
-	    $string = $macro . $post;
-	    die 'Factor $Text::iPerl::max_macro_growth exceeded'
-		if $max_length < $length + length $string;
-	    die '$Text::iPerl::max_macro_expansions exceeded'
-		if $max_macro_expansions < ++$i;
-	}
-    }
-    print $string;
-    '';
-}
-
-
-
-sub compile(;$$$) {
-    local $prog = '@_=();';
-    my @_Text_iPerl;
-    local( $style, $macro_start, $macro_end, $macro_start_dollar1,
-	   $joiner, $splitter, $printfer, $comment_level, @documents ) =
-	( $style, $macro_start, $macro_end, $macro_start_dollar1,
-	  $joiner, $splitter, $printfer, $comment_level, @documents );
-    $documents++;
-    push @documents, $_[2] || '<STRING>';
-    {
-	my $string = @_ ? $_[0] : $_;
-	if( $style =~ /^auto/ ) {
-	    my $orig_style = $style;
-	    my $det_style =
-		($string =~
-		    /\A(?:\#!.+\n)?
-		     .*-\*-.*\b iPerl-style:\s*"(.+?)" .*-\*-/mx) ? $1 :
-		(substr( $string, -3000 ) =~
-		    /^(.*?)[ \t]* Local\ Variables: [ \t]*(.*)$
-		     (?:[\s\S]*?)
-		     ^\1[ \t]* iPerl-style:\s*"(.+?)" [ \t]*\2$
-		     (?:[\s\S]*?)
-		     ^\1[ \t]* End: [ \t]*\2$
-		     (?:(?!\n).)*\Z/mx) ? $3 :
-		case( $documents[-1], @autostyle_by_name ) ||
-		case( $string, @autostyle_by_contents );
-	    if( $det_style ) {
-		set_style $det_style;
-		$style = "auto: $style";
-	    } elsif( $orig_style eq 'auto' ) {
-		die "No style determined for $documents[-1]";
-	    }
-	}
-	my( $bol, $length, @res ) = 1;
-	while( 1 ) {
-	    @res = &$splitter( $string,
-			       $bol ? '^' : '(?!\A)^',
-			       ${['\Z',
-				  $bol ? '^' : '(?!\A)^',
-				  $bol ? '^[^\S\n]*' : '(?!\A)^[^\S\n]*',
-				  '']}[$comment_level],
-			       ${['',
-				  '$ \n?',
-				  '[^\S\n]*$ \n?',
-				  '']}[$comment_level] );
-	    for( $res[0] ) {
-		next unless defined and $length = length;
-		$prog .= 'Text::iPerl::output ' .
-		    (( $length < 20 and ! /[\\']/ ) ?
-		     "'$_';" :
-		     ('$_Text_iPerl[' .
-		      (push( @_Text_iPerl, $_ ) - 1) .
-		      '];'));
-	    }
-	    for( $res[1] ) {
-		next unless defined;
-		/\A\s*($printfer\s*)?(.*?)\s*\Z/s;
-		$prog .= 'print' . ($1 ? 'f' : '') . ' STDOUT (' .
-		    ($2 eq int( $2 ) ? "\$_[$2]" : $2 || '$_') ."\n);";
-	    }
-	    for( $res[2] ) {
-		next unless defined;
-		/\A\s*($joiner\s*)?(.*?)\s*($joiner\s*)?\Z/s;
-		chop $prog if defined $1 && ';' eq substr $prog, -1, 1;
-		$prog .= defined $3 ? " $2 " : " $2\n;";
-	    }
-	last unless defined $res[3];
-	    $string = $res[3];
-	    $bol = defined $res[4] && "\n" eq substr $res[4], -1, 1;
-	}
-    }
-    if( $debug ) {
-	print "\$style = '$style';\n\n";
-	my $j = 0;
-	foreach( @_Text_iPerl ) {
-	    s/\\/\\\\/g;
-	    s/'/\\'/g;
-	    print "my \$_Text_iPerl[$j] = '$_';\n\n";
-	    $j++;
-	}
-	print "\f\n$prog\n";
-	exit;
-    }
-
-    push @_Text_iPerl,
-	\( $macro_start, $macro_end,
-	   $joiner, $splitter, $printfer, @documents );
-    $prog = eval qq|
-	sub {
-	    local( \$style, \$comment_level,
-		   \$macro_start_dollar1, \$macro_start, \$macro_end,
-		   \$joiner, \$splitter, \$printfer, \@documents ) =
-		( '$style', $comment_level, $macro_start_dollar1, | .
-    join( ', ', map { ($_ == -1 ? '@' : '$') .
-			  "{\$_Text_iPerl[$_]}\n" } -6..-1 ) .
-	  qq| );
-	    package $_[1];
-#line 1 '$documents[-1]'
-	    $prog
-	}
-    |;
-    die $@ if $@;
-    $prog;
-}
 
 
 =item return
@@ -595,7 +698,7 @@ Set one of the following iPerl-styles.  The various styles are more or less
 adapted to various document types.  But of course any style can be used
 anywhere.  Sometimes this requires some extra care, for example HTML documents
 may contain the sequence C<!E<lt>> which can lead to startling effects when
-used with the bang-style.
+used with the bang style.
 
 It can sometimes be useful to have two different styles in a document, for
 example if you want to do some time-consuming offline treatment in a document
@@ -603,7 +706,7 @@ that will nevertheless later be an active web-document.
 
 The macro invocation style is the only one to be immediately effective, being
 a runtime affair.  The styles for embedded bits of Perl, being a compiletime
-affair only become effective for the next iPerl-documents to be included.
+affair, only become effective for the next iPerl-documents to be included.
 
 The mnemonic for the variously used C<{...}> is a Perl block, though here it
 is simply a stretch of interpolated Perl code, that does B<not> define a
@@ -619,7 +722,8 @@ of the following:
 sub set_style($;@) {
     my $orig_style = $style;
     $style = shift;
-    $macro_start = $macro_end = '';
+    $macro_start = $macro_end = '\b';
+    $macro_end = '';
     $macro_start_dollar1 = 0;
 
 
@@ -658,7 +762,7 @@ preceding alphanumeric characters.
 		/mx;
 	    $_[0];
 	};
-	$macro_start = '&?';
+	$macro_start = '&?\b';
     }
 
 
@@ -675,7 +779,7 @@ C<^E>.  This reminds of print and end.
 
 =cut
 
-    elsif( $style =~ 'control' ) {
+    elsif( $style eq 'control' ) {
 	$splitter = sub {
 	    return $`,  $1,  $2 || $3,  $',  $&
 		if $_[0] =~ /
@@ -755,15 +859,15 @@ Everything from the pseudo-macro C<dnl> through end of line is deleted.
 The customary m4 macros C<decr>, C<define> (iPerl semantics), C<defn>,
 C<errprint>, C<eval>, C<ifdef>, C<ifelse>, C<include> (iPerl semantics),
 C<incr>, C<index>, C<len>, C<maketemp>, C<m4exit>, C<sinclude>, C<substr>,
-C<syscmd>, C<sysval>, C<translit> (with an additional optional 4th argument
-for the modifiers of tr) and C<undefine> are predefined.
+C<syscmd>, C<sysval>, C<traceoff>, C<traceon>, C<translit> (with an additional
+optional 4th argument for the modifiers of tr) and C<undefine> are predefined.
 
 The customary m4 macros C<changecom>, C<changequote>, C<divert>, C<divnum>,
-C<dumpdef>, C<m4wrap>, C<popdef>, C<pushdef>, C<shift>, C<traceon>,
-C<traceoff> and C<undivert> are not implemented.
+C<dumpdef>, C<m4wrap>, C<popdef>, C<pushdef>, C<shift> and C<undivert> are not
+implemented.
 
 No macro expansion takes place after a C<#>.  This could be changed with
-C<set_style macro =E<gt> ...>, but note that the above mentioned pseudo-macros
+C<$macro_start> and friends, but note that the above mentioned pseudo-macros
 are already expanded at compile-time.  Changing this within the document would
 lead to two different comment-styles being used.
 
@@ -784,7 +888,7 @@ unquoted string.
 	    $_[0];
 	};
 	$max_macro_growth = 10000;
-	$macro_start = '((?:^|\n)[^#\n]*?)';
+	$macro_start = '((?:^|\n)[^#\n]*?)\b';
 	$macro_start_dollar1 = 1;
 	foreach( qw(define eval include index substr undefine) ) {
 	    define;
@@ -792,7 +896,7 @@ unquoted string.
 	define decr => sub { $_[0] - 1 };
 	define defn => \&macro;
 	define errprint => sub { print STDERR @_ };
-	define ifdef => sub { macro( $_[0] ) ? $_[1] : $_[2] };
+	define ifdef => sub { defined macro( $_[0] ) ? $_[1] : $_[2] };
 	define ifelse => sub {
 	    while( defined( $_[1] ) && $_[1] ) {
 		return $_[2] if $_[0] eq $_[1];
@@ -807,6 +911,24 @@ unquoted string.
 	define sinclude => sub { include $_[0], $_[1], 1 };
 	define syscmd => sub { local $| = 1; $sysval = system @_; '' };
 	define sysval => sub { $sysval / 256 };
+	define traceoff => sub {
+	    if( @_ ) {
+		foreach( @_ ) {
+		    delete $trace{$_};
+		}
+	    } else {
+		delete $debug{t};
+	    }
+	};
+	define traceon => sub {
+	    if( @_ ) {
+		foreach( @_ ) {
+		    $trace{$_} = 1;
+		}
+	    } else {
+		$debug{t} = 1;
+	    }
+	};
 	define translit => sub {
 	    local $_ = $_[0];
 	    _eval "tr/$_[1]/$_[2]/" . (defined( $_[3] ) ? $_[3] : '');
@@ -887,25 +1009,27 @@ C<ME<lt>> and C<E<gt>> delimit a macro call within a paragraph.
     }
 
 
+=item 'xml'
+
 =item 'sgml'
 
-Lines starting with C<E<lt>!--> are deleted upto next C<--E<gt>> if it is at
-end of line.
+Everything from C<E<lt>!--> upto next C<--E<gt>> is deleted depending on
+C<$comment_level>.
 
 Bits of Perl are enclosed in C<E<lt>script runat=serverE<gt>> and
 C<E<lt>/scriptE<gt>> or C<E<lt>serverE<gt>> and C<E<lt>/serverE<gt>>.
 Attributes, such as C<language=Perl> are ignored but recomended to prevent
 mistreatment by other parsers.  More general alternate tags are
 C<E<lt>perlE<gt>> and C<E<lt>/perlE<gt>>.  As a more convenient (though
-probably not SGML compliant) alternative, closer to the other iPerl-styles,
-bits of Perl may be enclosed in C<E<lt>{> and C<}E<gt>>.  As a special case
-C<E<lt>}E<gt>> without whitespace is equivalent to C<E<lt>{}}E<gt>>, i.e. one
-closing brace.  The alternatives are likely not recognized by WISIWYG-HTML
-editors, not being proper HTML, and even the server tag might be a Netscape
-feature, which other editors cannot handle.  Even the C<script> tag can be
-problematic since it may conditionally include one stretch of text or another,
-which cannot be done with Javascript, thus confusing an editor which
-unconditionally sees both stretches of text.
+probably not XML or SGML compliant) alternative, closer to the other
+iPerl-styles, bits of Perl may be enclosed in C<E<lt>{> and C<}E<gt>>.  As a
+special case C<E<lt>}E<gt>> without whitespace is equivalent to
+C<E<lt>{}}E<gt>>, i.e. one closing brace.  The alternatives are likely not
+recognized by WISIWYG-HTML editors, not being proper HTML, and even the server
+tag might be a Netscape feature, which other editors cannot handle.  Even the
+C<script> tag can be problematic since it may conditionally include one
+stretch of text or another, which cannot be done with Javascript, thus
+confusing an editor which unconditionally sees both stretches of text.
 
 Perl values to be printed to the document are enclosed in C<&E<lt>> and
 C<E<gt>;>.  This reminds of the Perl read operator, inverted here in that the
@@ -916,11 +1040,11 @@ values to be printed to the document are enclosed in a pair of C<`>.  When
 this is not followed by a C<=> the result is surrounded with double quotes.
 
 Entities (iPerl macros) are enclosed in C<&> and C<;>.  If the enclosed text
-is not a defined macro, it is left as an SGML entity.
+is not a defined macro, it is left as an XML entity.
 
 =cut
 
-    elsif( $style eq 'sgml' ) {
+    elsif( $style eq 'xml' or $style eq 'sgml' ) {
 	$splitter = sub {
 	    return $`,  defined( $1 ) ? $1 :
 		($2 && ($3 ? "$2, '$3'" : "'\"', $2, '\"'")),
@@ -995,7 +1119,8 @@ Removes the definedness of I<EXPR> or C<$_>.
 
 sub undefine(;$) {
     my( $macro ) = @_;
-    $macro = $_ unless $macro;
+    $macro ||= $_;
+    debug \$macro => "undefine $macro";
     $defines =
 	join '|',
 	grep !/^$macro$/,
@@ -1008,7 +1133,9 @@ sub undefine(;$) {
 
 __END__
 
+
 
+
 
 =head1 VARIABLES
 
@@ -1018,15 +1145,15 @@ __END__
 =item @autostyle_by_contents
 
 Hash-like list of regexps to match against document to determine the mode to
-use when C<$style> starts with C<auto>.  Unlike a hash, this list is processed
-sequentially until a match is found.
+use when C<$style> starts with C<'auto'>.  Unlike a hash, this list is
+processed sequentially until a match is found.
 
 
 =item @autostyle_by_name
 
 Hash-like list of regexps to match against filenames (actually against
 C<$documents[-1]>) to determine the mode to use when C<$style> starts with
-C<auto>.  Unlike a hash, this list is processed sequentially until a match is
+C<'auto'>.  Unlike a hash, this list is processed sequentially until a match is
 found.
 
 
@@ -1035,11 +1162,14 @@ found.
 Make C<include> cache the compiled form of the document for quick reuse when
 called again for the same file if C<true>.
 
+Due to a Perl-bug with nested closures, source code, rather than byte code, is
+cached when it contains the word sub.
+
 
 =item $comment_level
 
 What to do with comments in a document when compiling it.  Concerns comments
-in the host part (like C</* ... */> in cpp style), not Perl comments.  Values
+in the host part (like C</* ... */> in style cpp), not Perl comments.  Values
 are:
 
 B<C<0>>:  Do not touch comments in document.
@@ -1055,13 +1185,31 @@ B<C<3>>:  Remove all comments in document.
 This may be hairy, since iPerl has no knowledge of the host document's syntax
 and will remove everything that looks like a comment.  In Perl or Korn shell,
 for example, C<#> does not start a comment in all syntactic contexts.  Or a C
-programme might contain C</* ... */> within a string.  That's why this
-variable defaults to C<1>, which is fairly safe.
+programme might contain C</* ... */> within a string.  So this variable
+defaults to C<1>, which is fairly safe.
 
 
-=item $debug
+=item %debug
 
-Output the generated Perl program rather than executing it if C<true>.
+Perform debugging for all flags associated with a true value:
+
+  c   generated Perl code
+  E   show intern evaluations
+  F   say current input file fullname
+  f   say current input file basename
+  i   say calls to include-functions
+  L   say location where debugger was called internally
+  p   show searching files in @include
+  t   trace for all macro calls, not only those in %trace
+  V   automatically implies any other letter
+
+The following flags are only relevant if C<t> is set or for macros in C<%trace>:
+
+  a   show actual arguments
+  e   show expansion
+
+You can add any other letter if you intend to use it in your own calls to
+C<debug>.
 
 
 =item $documents
@@ -1091,16 +1239,23 @@ bit of Perl to suppress the semicolon at that point.
 
 =item $macro_end
 
+=item $macro_name_end
+
 =item $macro_start
 
 =item $macro_start_dollar1
 
-C<$macro_start> and C<$macro_end> are regexps describing the syntactic sugar
-which is eliminated around macro invocations.  If, as in m4-style,
-C<$macro_start> has to look backwards, it should contain one paren-pair
-matching the portion of text not to discard, and C<$macro_start_dollar1>
-should then be true.  These change every time a C<set_style> is called
-explicitly or implicitly.
+C<$macro_start>, C<$macro_name_end> and C<$macro_end> are regexps describing
+the syntactic sugar which is eliminated around macro invocations.  If, as in
+style m4, C<$macro_start> has to look backwards, it should contain one
+paren-pair matching the portion of text not to discard, and
+C<$macro_start_dollar1> should then be true.  These change every time a
+C<set_style> is called explicitly or implicitly.
+
+If C<$macro_start> and C<$macro_name_end> don't contain the regexp C<\b>,
+macros will be found in the middle of words.  Or you can use the latter
+variable to allow whitespace before the argument list, or prevent it
+alltogether with a negative lookahead for a parenthesis.
 
 
 =item $max_macro_growth
@@ -1141,18 +1296,17 @@ bit of Perl to use printf instead of print.
 =item $style
 
 This is the name of the style currently in effect.  If this starts with
-C<auto>, the style used for an included document is determined in three steps
+C<'auto'>, the style used for an included document is determined in three steps
 as follows.  This variable is then set to C<auto: I<style>>.
 
 =over
 
 =item Style specified in the file
 
-This is identical to Emacs' local variables specification inside a file.
-There are two possibilities (here shown for style bang): On the first line, or
-on the second if the first line is a shebang magic number (C<#!
-I<interpreter>>), with possibly other semicolon separated variables for use by
-Emacs:
+This is identical to Emacs' local variables specification inside a file. There
+are two possibilities (here shown for style bang): On the first line, or on
+the second if the first line is a shebang magic number (C<#! I<interpreter>>),
+with possibly other semicolon separated variables for use by Emacs:
 
   -*- iPerl-style: "bang" -*-
 
@@ -1164,6 +1318,7 @@ specification-lines only used by Emacs:
   /* Local Variables: */
   /* iPerl-style: "bang" */
   /* End: */
+
 
 The style must be given as a double-quoted literal string.  This can appear
 anywhere, i.e. in a bit of Perl as a comment or string or in the host
@@ -1185,6 +1340,12 @@ there is none, we die.
 
 Closure needed for internal purposes visible within your document.  The
 effects of changing this variable are not defined.
+
+
+=item %trace
+
+Debug macro operations for all macros who's name is associated with a true
+value, irrespective of the flags in C<%debug>.
 
 
 =back

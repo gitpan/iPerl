@@ -71,7 +71,7 @@ and the next few calendar weeks.  Sometimes both services are assumed by the
 same person.</p>
 
 <table border cellspacing=0 cellpadding=5>
-<tr><th>Week<th>In House<th>On Call
+<tr><th>Week</th><th>In House</th><th>On Call</th></tr>
 <script runat=server language=perl>
 
   foreach( keys %Email ) {
@@ -87,17 +87,18 @@ same person.</p>
   $week = int( $week ) + ($week > int $week);
   $week += (($YDay - $WDay + 1) % 7) >= $Days_of_first_week;
   my %Farbe = ($week => " bgcolor='#33dddd'");
-
-  foreach( sort { $a < $b } keys %On_Call ) {
+  my %done_it;
+  foreach( sort { $a <=> $b } keys %In_House, keys %On_Call ) {
+    next if $done_it{$_}++
 </script>
-  <tr &<$Farbe{$_ % 100}>;><th> &<$_ % 100>;
+  <tr &<$Farbe{$_ % 100}>;><th> &<$_ % 100>;</th>
   <script runat=server language=perl>
     if( $In_House{$_} eq $On_Call{$_} ) {
   </script>
-    <td colspan=2>              &<$Name{$In_House{$_}}>;
+    <td colspan=2>              &<$Name{$In_House{$_}}>;</td></tr>
   <script runat=server language=perl> } else { </script>
-    <td> &<$Name{$In_House{$_}}>;
-    <td> &<$Name{$On_Call{$_}}>;
+    <td> &<$Name{$In_House{$_}}>;</td>
+    <td> &<$Name{$On_Call{$_}}>;</td></tr>
 <script runat=server language=perl>
     }
   }
@@ -108,7 +109,8 @@ same person.</p>
 
 =head1 NAME
 
-service.phtml - display directory of colleagues on service generated from hashes
+service.phtml - display directory of colleagues on service
+generated from hashes
 
 =head1 SYNOPSIS
 
@@ -118,7 +120,7 @@ categories of service.
 
 =head1 DESCRIPTION
 
-Bits of Perl in this document are marked up in sgml style.
+Bits of Perl in this document are marked up in style sgml.
 
 The first Perl-section associates the initials of people providing the two
 services to calendar weeks via two hashes.  The name, mailaddress and

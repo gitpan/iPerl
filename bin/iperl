@@ -1,6 +1,6 @@
 #! /usr/local/bin/perl
 #
-# inverted Perl Preprocessor for Arbitrary Files
+# Commandline Frontend to Inverse Perl Preprocessor for Arbitrary Documents
 #
 my $Copyright = '
 Copyright © 1999, 2000, Daniel Pfeiffer <occitan@esperanto.org>
@@ -11,7 +11,7 @@ the GNU General Public License, which may be found in the Perl 5.0 source kit.
 Info and latest version are at http://beam.to/iPerl/
 ';
 
-use Text::iPerl $VERSION = 0.53;
+use Text::iPerl $VERSION = 0.6;
 
 package Text::iPerl;
 
@@ -20,25 +20,27 @@ set_style $1
 
 use Getopt::Long;
 Getopt::Long::config qw( bundling no_getopt_compat permute );
-my $included = 0;
 
 
-my $output_rule = 0;
-my( $include_pipe, $include_string ) = ('', '');
+my( $output_rule, $include_pipe, $include_string ) =
+    (0, 0, '', '');
 sub _include(;$) {
     if( $output_rule ) {
-	local $_ = shift;
-	if( ! defined $_ or /^-$/ ) {
+	local $_ = $_[0];
+	s/^\s*<?\s*(.*)\s*/$1/;
+	if( ! defined or /^-$/ ) {
 	    $_ = 'stdin.out';
-	} elsif( /\|\s*$/ ) {
+	} elsif( /\|$/ ) {
 	    $_ = 'pipe' . $include_pipe++ . '.out';
+	} elsif( /\.p(?:[hlms]|db|[bgnp]m|hp[1-4]?)$|\.[ch]pp$/ ) {
+	    # where p in *.p* or *.*p doesn't mean iPerl
+	    $_ .= '.out';
 	} else {
 	    s/^\s*<?(.*\.)(?:p([^.]*)|([^.]*)p)$/$1$+/ or
-		s/^\s*<?(.*)/$1.out/;
+		$_ .= '.out';
 	}
 	open STDOUT, ">$_";
     }
-    $included = 1;
     package main;
     include $_[0];
 }
@@ -63,27 +65,31 @@ GetOptions
     'B|bang|unix' => sub { set_style 'bang' },
 
 
-    'c|cache' => sub { $cache = 1 },
+    'c|cache:i' => sub { $cache = $_[1] + 0 },
 
 
-    'C|comment-level|comment_level:i' => sub { $comment_level = $_[1] },
+    'C|comment-level|comment_level:i' => sub { $comment_level = $_[1] + 0 },
 
 
     'control|control-chars|control_chars|ctrl' => sub { set_style 'control' },
 
 
-    'd|debug' => sub { $debug = 1 },
+    'd|debug=s' => sub {
+	foreach( split '', $_[1] ) {
+	    $Text::iPerl::debug{$_} = 1;
+	}
+    },
 
 
     'D|define=s' => sub {
 	my( $opt, $opt_arg ) = split '=', $_[1], 2;
-	if( $opt_arg ) { define $opt, $opt_arg }
-	else { define $opt, 1 }
+	define $opt, $opt_arg || 1;
     },
 
 
     'e|eval=s' => sub {
-	eval "#line 1 '--eval'\n$_[1]";
+	package main;
+	eval qq{#line 1 "--eval"\n$_[1]};
 	die $@ if $@;
     },
 
@@ -103,8 +109,8 @@ GetOptions
     'i|include-string|include_string=s' => sub {
 	open STDOUT, '> include-string' . $include_string++ . '.out'
 	    if $output_rule;
-	$included = 1;
-	include_string $_[1], 'main', '<COMMANDLINE>';
+	package main;
+	include_string $_[1], '<COMMANDLINE>';
     },
 
 
@@ -121,44 +127,44 @@ GetOptions
     },
 
 
-#      'O|output-rule|output_rule:s' => sub {
-#  	if( $_[1] ) {
-#  	    my $rule = $_[1];
-#  	    $rule =~ s/\\/\\\\/g;
-#  	    $output_rule = eval q! sub {
-#  		$_[0] =~ s/^<?\s*(.*?)\s*\|?$/$1/;
-#  		$_[0] =~ s! . $rule . q!;
-#  		print STDERR $_[0];
-#  		$_[0];
-#  	    }!;
-#  	    if( $@ ) {
-#  		$@ =~ s/\(eval [0-9]+\) line [0-9]+/option --output_rule/;
-#  		die $@;
-#  	    }
-#  	} else {
-#  	    $output_rule = sub {
-#  		my( $name, $suffix ) =
-#  		    $_[0] =~ /^<?\s*(.*?)(?:\.([^\/.]+)|\s*\|)?$/;
-#  		if( $suffix ) {
-#  		    $suffix =~ s/^p(.+)|(.+)p$/$1$2/;
-#  		} else {
-#  		    $suffix = 'out';
-#  		}
-#  		print STDERR "$name.$suffix";
-#  		"$name.$suffix";
-#  	    }
-#  	}
-#      },
+#	:s is unusable since it swallows the next arg if nothing is given
+#    'O|output-rule|output_rule:s' => sub {
+#	if( $_[1] ) {
+#	    my $rule = $_[1];
+#	    $rule =~ s/\\/\\\\/g;
+#	    $output_rule = eval q! sub {
+#		$_[0] =~ s/^<?\s*(.*?)\s*\|?$/$1/;
+#		$_[0] =~ s! . $rule . q!;
+#		print STDERR $_[0];
+#		$_[0];
+#	    }!;
+#	    if( $@ ) {
+#		$@ =~ s/\(eval [0-9]+\) line [0-9]+/option --output_rule/;
+#		die $@;
+#	    }
+#	} else {
+#	    $output_rule = sub {
+#		my( $name, $suffix ) =
+#		    $_[0] =~ /^<?\s*(.*?)(?:\.([^\/.]+)|\s*\|)?$/;
+#		if( $suffix ) {
+#		    $suffix =~ s/^p(.+)|(.+)p$/$1$2/;
+#		} else {
+#		    $suffix = 'out';
+#		}
+#		print STDERR "$name.$suffix";
+#		"$name.$suffix";
+#	    }
+#	}
+#    },
 
 
-    'O|output-rule|output_rule' => sub { $output_rule = 1 },
+    'O|output-rule|output_rule' => sub { $output_rule = ! $output_rule },
 
 
-    'P|pod:i' => sub { set_style pod => $_[1] && $_[1] ne 0 },
+    'P|pod:i' => sub { set_style pod => $_[1] + 0 },
 
 
-    'S|sgml|html|xml|markup-language|markup_language' =>
-	sub { set_style 'sgml' },
+    't|trace=s' => sub { $trace{$_[1]} = 1 },
 
 
     'U|undefine=s' => sub { undefine $_[1] },
@@ -173,14 +179,18 @@ GetOptions
     },
 
 
+    'X|xml|html|sgml|markup-language|markup_language' =>
+	sub { set_style 'xml' },
+
+
     (($Getopt::Long::VERSION >= 2.17) ? 'help|?' : 'help') => sub {
 	print "usage: $0\[ option|file] ...\n", <<\EOF, $Copyright;
   -A, --auto, --autostyle
   -B, --bang, --unix
-  -c, --cache
-  -C, --comment-level[ <flag>]
+  -c, --cache[ {01}]
+  -C, --comment-level[ {0123}]
       --control, --control-chars, --ctrl
-  -d, --debug
+  -d, --debug {acefptV}
   -D, --define <macro>[=<definition>]
   -e, --eval <expr>
   -E, --cpp
@@ -191,19 +201,20 @@ GetOptions
   -M, --m4
   -o, --output <file>
   -O, --output-rule
-  -P, --pod[ <flag>]
-  -S, --sgml, --html, --xml, --markup-language
+  -P, --pod[ {01}]
+  -t, --trace <macro>
   -U, --undefine <macro>
   -v, --version
+  -X, --xml, --html, --sgml, --markup-language
 EOF
 	exit;
     },
 
 
-    '<>' => \&_include;
+    '<>' => sub { _include $_[0] };
 
 
-_include unless $included;
+_include unless $documents;
 
 __END__
 
@@ -226,8 +237,8 @@ If present, the environment variable C<$IPERL> is processed as though the
 parameters in it were given at the beginning of the command-line.  No Shell
 syntax is parsed, except that it is split on spaces.
 
-The options C<-C>, C<-D>, C<-E>, C<-I>, C<-o> and C<-U> are like in the C
-compiler or m4 macro processor.
+The vitamins -- I<ahem!> -- options C<-C>, C<-d>, C<-D>, C<-E>, C<-I>, C<-o>
+and C<-U> are like in the C compiler or m4 macro processor.
 
 =over
 
@@ -244,10 +255,10 @@ C<!E<lt>...E<gt>!> for printing bits of Perl and an optional leading C<&> for
 macro invocations.
 
 
-=item -c, --cache
+=item -c, --cache[ I<flag>]
 
-Cache all files given on the command line or in include directives, such that
-they are not reread or recompiled when included again.
+If flag is C<1> cache all files given on the command line or in include
+directives, such that they are not reread and recompiled when included again.
 
 
 =item -C, --comment-level[ I<flag>]
@@ -262,9 +273,9 @@ Set style based on control characters, i.e. lines of Perl begin with C<^A>,
 C<^B...^E> is for bits of Perl and C<^P...^E> for printing bits of Perl.
 
 
-=item -d, --debug
+=item -d, --debug I<flags>
 
-Output the generated intermediate programme, rather than executing it.
+B<Output the generated intermediate programme, rather than executing it.>
 
 
 =item -D, --define I<macro>[=I<definition>]
@@ -331,8 +342,9 @@ incremented when in the same invocation another pipe or C<--include-string>
 document is encountered, regardless whether such a file already exists.
 
 When reading from a normal file, the output is directed to a file named
-similarly.  If the filename has a suffix starting or else ending with a C<p>
-that letter is eliminated.  Otherwise C<.out> is appended.
+similarly.  If the filename has a suffix other than C<p[hlms]>, C<pdb>,
+C<p[bgnp]m>, C<php>, C<php[1-4]> or C<[ch]pp> starting or else ending with a
+C<p> that letter is eliminated.  Otherwise C<.out> is appended.
 
 This option remains in effect until given again or an option C<--output>
 overrides it.
@@ -356,6 +368,12 @@ C<E<lt>serverE<gt>...E<lt>/serverE<gt>> or C<E<lt>script
 runat=serverE<gt>...E<lt>/scriptE<gt>>.  Printing bits of Perl (entities) are
 C<&E<lt>...E<gt>;> or C<`...`> and macro entities are C<&macro;> or C<&macro(
 arg, ... );>.
+
+
+=item -t, --trace I<macro>
+
+Trace I<macro> when it will be defined.
+
 
 =item -U, --undefine I<macro>
 

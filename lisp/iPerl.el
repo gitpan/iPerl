@@ -14,7 +14,7 @@
 
 ;;; Commentary:
 
-;; This package is a minor mode for editing iPerl version 0.53 documents.
+;; This package is a minor mode for editing iPerl version 0.6 documents.
 
 ;;; Code:
 
@@ -33,8 +33,7 @@
 
 
 (defcustom iPerl-text-face nil
-  "*Face that highlights text parts of an iPerl document or nil.
-There is no point in setting this if you use font-locking."
+  "*Face that highlights plain text parts of an iPerl document or nil."
   :type 'face
   :group 'iPerl)
 (setplist 'iPerl-text
@@ -184,9 +183,12 @@ After that, changing the prefix key requires manipulating keymaps."
 When given in a file's local variables section must be a literal string,
 since that is what the iPerl interpreter understands, but as a lisp-variable
 this gets transformed to a symbol as soon as it is used.")
+(put 'iPerl-style 'permanent-local t)
+
 
 (defcustom iPerl-style-equiv
-  '((sgml . sgml-script)
+  '((xml . xml-script)
+    (sgml . xml-script)
     (unix . bang))
   "*Alternate style to search for when car is not found in some alist."
   :type 'list
@@ -209,7 +211,7 @@ this gets transformed to a symbol as soon as it is used.")
 		"P<"		'">"
 		"^=begin perl"	"^=end perl"
 		"^=for perl"	"\n\n\\|\\'")
-    (sgml	"<perl>"	"</perl>"
+    (xml	"<perl>"	"</perl>"
 		"<script[^>]*\\s +runat\\s *=\\s *server[^>]*>" "</script>"
 		"<server>"	"</server>"
 		"<{"		"}>"
@@ -241,6 +243,8 @@ end-regexp is quoted, the pair surrounds a printing bit of Perl."
   "When non-`nil' is the end of header for prepending by \\[iPerl-on-region].
 That command is also used for setting this variable.")
 
+
+(defvar iPerl-skeleton-filter)
 
 
 
@@ -318,9 +322,11 @@ Info on iPerl and latest version are at http://beam.to/iPerl/"
       (widen)
       (and ;; (= emacs-major-version 20)
 	   ;; (< emacs-minor-version 7)
-	   (progn
+	   (let ((modified (buffer-modified-p)))
 	     (put-text-property (point-min) (point-max) 'point-entered nil)
-	     (put-text-property (point-min) (point-max) 'point-left nil)))
+	     (put-text-property (point-min) (point-max) 'point-left nil)
+	     (or modified
+		 (set-buffer-modified-p nil))))
       (mapcar
        (lambda (o)
 	 (if (memq (overlay-get o 'category) iPerl-categories)
@@ -333,7 +339,7 @@ Info on iPerl and latest version are at http://beam.to/iPerl/"
 ;;;###autoload
 (defun iPerl-mode-if-style ()
   "Turn on iPerl-mode if `iPerl-style' is set.
-This can be added to `change-major-mode-hook' for files that have this in
+This can be added to `hack-local-variables-hook' for files that have this in
 their local variables section."
   (and (boundp 'iPerl-style)
        iPerl-style
@@ -345,7 +351,7 @@ their local variables section."
   (interactive
    (let ((style (completing-read "Style: (default bang) "
 				 '(("bang") ("control") ("cpp") ("m4")
-				   ("pod") ("sgml") ("unix"))
+				   ("pod") ("sgml") ("xml") ("unix"))
 				 nil t)))
      (if (string= style "") '("bang") (list style))))
   (mapcar
@@ -583,31 +589,31 @@ region, clear header."
 
 (define-skeleton iPerl-bit
   "Insert markup for a bit of Perl.
-There are four variations of sgml, `sgml-perl', `sgml-script', `sgml-server'
-and `sgml-short' one of which gets chosen via `iPerl-style-equiv'.
+There are four variations of xml, `xml-perl', `xml-script', `xml-server'
+and `xml-short' one of which gets chosen via `iPerl-style-equiv'.
 See `iPerl-skeleton-space'."
   (bang () "!{" space _ space "}!")
   (control () ? space _  space ?)
   (m4 () "perl({" space _ space "})")
   (pod () "P<{" space _ space "}>")
-  (sgml-perl () "<perl>" space _ space "</perl>")
-  (sgml-script () "<script runat=server>" space _ space "</script>")
-  (sgml-server () "<server>" space _ space "</server>")
-  (sgml-short () "<{" space _ space "}>"))
+  (xml-perl () "<perl>" space _ space "</perl>")
+  (xml-script () "<script runat=server>" space _ space "</script>")
+  (xml-server () "<server>" space _ space "</server>")
+  (xml-short () "<{" space _ space "}>"))
 
 (define-skeleton iPerl-long-bit
   "Insert markup for a multiline bit of Perl.
-See `iPerl-bit' for sgml possiblities and `iPerl-skeleton-space'."
+See `iPerl-bit' for xml possiblities and `iPerl-skeleton-space'."
   (bang () "!{\n" _ "\n}!")
   (control () "\n" _ "\n")
   (m4 () "perl({\n" _ "\n})")
   (pod () '(if (bolp) ?\n "\n\n")
        "=begin perl\n" _ "\n\n=end perl"
        '(if (eolp) ?\n "\n\n"))
-  (sgml-perl () "<perl>\n" _ "\n</perl>")
-  (sgml-script () "<script runat=server>\n" _ "\n</script>")
-  (sgml-server () "<server>\n" _ "\n</server>")
-  (sgml-short () "<{\n" _ "\n}>"))
+  (xml-perl () "<perl>\n" _ "\n</perl>")
+  (xml-script () "<script runat=server>\n" _ "\n</script>")
+  (xml-server () "<server>\n" _ "\n</server>")
+  (xml-short () "<{\n" _ "\n}>"))
 
 (define-skeleton iPerl-printing-bit
   "Insert markup for a printing bit of Perl.
@@ -616,7 +622,7 @@ See `iPerl-skeleton-space'."
   (control () ? space _  space ?)
   (m4 () "perl(<" space _ space ">)")
   (pod () "P<" space _ space ?>)
-  (sgml () "&<" space _ space ">;"))
+  (xml () "&<" space _ space ">;"))
 
 (define-skeleton iPerl-line
   "Insert markup for a line of Perl.
@@ -659,10 +665,10 @@ menu.  Or use Describe Function... and type in C<iPerl-mode>.
 
 =head1 INSTALLATION
 
-Click Describe Buffer Modes from the Help menu and type in C<load-path>.  You
+Click Describe Variable... from the Help menu and type in C<load-path>.  You
 get a list of directories where Emacs looks for libraries.  You should copy
 F<lisp/iPerl.elc> and optionally the source file F<lisp/iPerl.el> to one of
-them.  The directory containing F<site-lisp> is foreseen for this.
+them.  Emacs foresees the directory containing F<site-lisp> for this.
 
 In your file F<~/.emacs> add the following:
 
@@ -676,9 +682,11 @@ In your file F<~/.emacs> add the following:
   (autoload 'iPerl-mode "iPerl" "Toggle iPerl minor mode." t nil)
 
 Of the first two lines you can chose one or the other.  The first one means,
-that the key sequence C<C-c ! C-m> (that's C<control-C ! control-M>) will
-activate and deactivate iPerl minor mode.  The second more conveniently means
-that C<f12 C-m> (that's C<F12 control-M>) will do it.
+along the guidelines for minor-mode keybindings, that the key sequence C<C-c !
+C-m> (that's C<control-C ! control-M>) will activate and deactivate iPerl
+minor mode.  The second more conveniently means that C<f12 C-m> (that's C<F12
+control-M>) will do it.  This is then also the keybinding prefix for all
+commands of iPerl minor mode.
 
 
 =head1 SEE ALSO
